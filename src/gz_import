@@ -1,0 +1,570 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+GZ_IMPORT_WORKING_DIR=/tmp/gz_import_working
+GZ_IMPORT_TMPROOT=$GZ_IMPORT_WORKING_DIR/tmproot
+GZ_IMPORT_ESXI_MENU_TITLE="Installation of ESXi x86_64"
+GZ_IMPORT_WINDOWS_MENU_TITLE="Installation of Microsfot Windows x86_64"
+GZ_IMPORT_MSDOS="Microsoft DOS"
+GZ_IMPORT_ESXI="ESXi"
+GZ_IMPORT_MSWINDOWS="Microsoft Windows"
+
+gz_import_info_dev() {
+    _grubcfgd=$1
+
+    for _os in esxi windows; do
+        echo "`echo $_os | tr '[:lower:]' '[:upper:]'`:"
+        if [ -f "$_grubcfgd/$_os.cfg" ]; then
+            while read -r _os_title; do
+                case $_os in
+                    esxi)
+                        _os_version=`echo $_os_title | sed 's/'"$GZ_IMPORT_ESXI"' \(.*\)/\1/gi'`
+                        ;;
+                    windows)
+                        _os_version=`echo $_os_title | sed 's/'"$GZ_IMPORT_MSWINDOWS"' \(.*\)/\1/gi'`
+                        ;;
+                esac
+                _os_menu_id=`cat $_grubcfgd/$_os.cfg | sed -n 's/.*menuentry.*'$_os_version'.*--id \w\+-\(.*\) {.*/\1/p'`
+                [ "$_os" = "windows" ] && _os_menu_id=`echo $_os_menu_id | sed -n 's/^\w\+-\(.*\)/\1/p'`
+                echo "    $_os_version:$_os_menu_id"
+            done< <(cat $_grubcfgd/$_os.cfg | sed -n 's/.*menuentry.*'"'"'\(.*\)'"'"'.*/\1/p')
+        fi
+    done
+}
+
+gz_deport() {
+    _dev=$1
+    _deport_path=$2
+
+    [ "$_deport_path" ] || return 1
+
+    _deport_path="`echo $_deport_path | sed 's|-|/|g' | sed 's|^/||' | sed 's|/\+|/|'`"
+    _gzroot=`gz_get_dev_mnt $_dev` || gz_log_err_exit "$FUNCNAME: get root of $_dev failed"
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+    _grubroot="$_gzroot/$GZ_GRUB_ROOT"
+
+    if [ -f $_gzroot/dos/$_deport_path ]; then
+        rm -f $_gzroot/dos/$_deport_path && return 0
+        _deport_id=`basename $_deport_path`
+        gz_menu remove $_grubroot /dos/$_deport_id
+        gz_cleanup_dev_mnt $_gzroot
+        return 0
+    fi
+
+    # need to very careful to remove files
+    _rmdir=`echo $_gzroot/$_deport_path | sed 's|/\+|/|'`
+    if [ "$_rmdir" != "/" ]; then
+        if [ -d $_rmdir/sources -o -f $_rmdir/syslinux.bin ]; then
+            rm -rf $_rmdir
+            _rmdir=`dirname $_rmdir`
+            gz_log_debug "rmdir $_rmdir gzroot $_gzroot"
+            while [ "$_rmdir" != "$_gzroot" ]; do
+                if [ "`ls -A $_rmdir`" ]; then
+                    break
+                else
+                    rmdir $_rmdir 2>/dev/null
+                fi
+                _rmdir=`dirname $_rmdir`
+            done
+        fi
+    fi
+
+    _menu_path=`echo $_deport_path | sed 's|/|-|'`
+    _menu_id=`cat $_grubroot/$GZ_GRUB_CFGD/esxi.cfg 2>/dev/null| sed -n 's/.*--id \(.*'$_menu_path'\).*/\1/p'`
+    if [ "$_menu_id" ]; then
+        gz_menu remove $_grubroot /`echo $_menu_id | sed 's|-|/|'`
+        gz_cleanup_dev_mnt $_gzroot
+        return 0
+    else
+        _menu_id=`cat $_grubroot/$GZ_GRUB_CFGD/windows.cfg 2>/dev/null| sed -n 's/.*--id \(.*'$_menu_path'\).*/\1/p'`
+        if [ ! "$_menu_id" ]; then
+            gz_msg "No such import id, $_menu_path, existed"
+            gz_cleanup_dev_mnt $_gzroot
+            return 1
+        fi
+        _bcd_name=`echo $_menu_id | awk -F "-" '{print $2}'`
+        _bcd_file=`find $_gzroot/efi -name "$_bcd_name"`
+        [ "$_bcd_file" ] || _bcd_file=`find $_gzroot/EFI -name "$_bcd_name"`
+        _bootx64_efi=`find $_gzroot/efi -name "boot${_bcd_name}.efi"`
+        [ "$_bootx64_efi" ] || _bootx64_efi=`find $_gzroot/EFI -name "boot${_bcd_name}.efi"`
+        gz_log_debug "$FUNCNAME: menu_id -> $_menu_id, bcd_name -> $_bcd_name, bcd_file -> $_bcd_file"
+        gz_menu remove $_grubroot /`echo $_menu_id | sed 's|-|/|'`
+        rm -f "$_bcd_file"
+        rm -f "$_bootx64_efi"
+        gz_log_debug "bootx64_efi: $_bootx64_efi bcd: $_bcd_file"
+        if [ ! -f $_grubroot/$GZ_GRUB_CFGD/windows.cfg ]; then
+            rm -rf `dirname $_bootx64_efi`/microsoft
+            rm $_gzroot/boot/bcd
+            rm $_gzroot/boot/boot.sdi
+        fi
+        gz_cleanup_dev_mnt $_gzroot
+        return 0
+    fi
+
+    gz_msg "No such DOS, ESXi or Windows image, $_deport_path, in device"
+    return 1
+}
+
+# assume user import correct image, no need to check what they import
+gz_import_dos() {
+    _dev=$1
+    _img=$2
+    _import_dir=$3
+    _version=$4
+
+    _gzroot=`gz_get_dev_mnt $_dev` || gz_log_err_exit "$FUNCNAME: get root of $_dev failed"
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+
+    _grubroot="$_gzroot/$GZ_GRUB_ROOT"
+    [ -f $_gzroot/boot/syslinux/4.07/bin/memdisk ] || gz_download_memdisk $_gzroot
+    if [ ! -f $_gzroot/boot/syslinux/4.07/bin/memdisk ]; then
+        gz_msg "Donwnload syslinux memdisk failed"
+        return 1
+    fi
+
+    mkdir -p $_gzroot/dos
+    cp -f $_img $_gzroot/dos
+
+    _menu_code="
+    if [ -f /boot/syslinux/4.07/bin/memdisk ]; then
+        linux16   /boot/syslinux/4.07/bin/memdisk raw
+        initrd16 /dos/`basename $_img`
+    fi
+    "
+
+    if [ ! "$_version" ]; then
+        _oem_id="`file $_img | sed 's/.*OEM-ID "\(.*\)", root.*/\1/'`"
+        _label="`file $_img | sed 's/.*label: "\(.*\)".*/\1/'`"
+        _version="$_oem_id $_label"
+    fi
+
+    _deport_id=`basename $_img`
+    _title="$GZ_IMPORT_MSDOS $_version"
+    _node=/dos/$_deport_id
+    _class=msdos
+
+    gz_menu add "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+
+    grep -i dos $_grubroot/$GZ_GRUB_CFGD/root.cfg > /dev/null 2>&1 ||
+        gz_submenu add $_grubroot /dos "$GZ_MENU_DOS_TITLE"
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+_get_esxi_version() {
+    _img=$1
+    _esxi_version=
+
+    mkdir -p $GZ_IMPORT_TMPROOT
+    _tmpdir=$GZ_IMPORT_TMPROOT
+
+    gz_img get $_img $_tmpdir /.discinfo 
+    if [ -f $_tmpdir/.discinfo ]; then
+        _esxi_version=`cat $_tmpdir/.discinfo | awk -F : '/Version/{print $2}'`
+        if [ ! "$_esxi_version" ]; then
+            gz_img get $_img $_tmpdir /upgrade/profile.xml 
+            if [ -f $_tmpdir/upgrade/profile.xml ]; then
+                _esxi_version=`cat $_tmpdir/upgrade/profile.xml | grep -oPm1 "(?<=<name>)[^<]+" | sed "s/.*'ESXI-\(.*\)'.*/\1/"`
+            else
+                gz_img get $_img $_tmpdir /upgrade/metadata.xml 
+               [ -f $_tmpdir/upgrade/metadata.xml ] &&
+                   _esxi_version=`cat $_tmpdir/upgrade/metadata.xml | grep -oPm1 "(?<=<esxVersion>)[^<]+"`
+            fi
+        fi
+    fi
+    echo "$_esxi_version"
+    [ "`echo $_tmpdir | sed 's|/\+|/|'`" != "/" ] && rm -rf $_tmpdir
+}
+
+gz_import_esxi() {
+    _dev=$1
+    _img=$2
+    _import_dir=$3
+    _version=$4
+    _syslinux=$GZ_IMPORT_WORKING_DIR/syslinux
+
+    # no 64bits binary available from download of syslinux tar ball
+    # we put the binary in the end of this program
+    _program_realpath=$PROGRAM_REALPATH
+    [ "$_program_realpath" ] || _program_realpath=$(which `basename $0`)
+    [ "$_program_realpath" ] || _program_realpath=$(realpath $0)
+    if [ ! -e "$_program_realpath" ]; then
+        gz_msg "Can not allocate program path"
+        return 1
+    fi
+
+    _start_of_binary=$(expr `sed -n '/^exit 0/=' $_program_realpath` + 1)
+    mkdir -p `dirname $_syslinux`
+
+    pushd . > /dev/null
+    cd `dirname $_syslinux`; sed -n "$_start_of_binary"',$p' $_program_realpath | tar zxvf - syslinux
+    popd > /dev/null
+
+    chmod 755 $_syslinux
+    if [ ! -x $_syslinux ]; then
+        gz_log_err "$FUNCNAME: Can not get syslinux binary"
+        return 1
+    fi
+
+    _gzroot=`gz_get_dev_mnt $_dev` || gz_log_err_exit "$FUNCNAME: get root of $_dev failed"
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+    _pdev=`cat /proc/mounts | grep "$_gzroot" | awk '{print $1}'`
+    if [ ! "$_pdev" ]; then
+        gz_cleanup_dev_mnt $_gzroot
+        gz_log_err "No partition found on $_dev"
+        return 1
+    fi
+
+    sleep 1
+    mkdir -p $_gzroot/$_import_dir
+    $_syslinux -U -s -d $_import_dir -i $_pdev
+    if [ $? != 0 ]; then
+        gz_cleanup_dev_mnt $_gzroot
+        gz_log_err "run syslinux failed on $_dev, please try again"
+        return 1
+    fi
+
+    mkdir -p $_gzroot/$_import_dir
+    dd if=$_pdev of=$_gzroot/$_import_dir/syslinux.bin bs=512 count=1
+
+    gz_msg "Extracting files from $_img ..."
+    gz_img get $_img $_gzroot/$_import_dir "/"
+    sed -i 's|/||g' $_gzroot/$_import_dir/boot.cfg
+    sed -i 's|prefix.*|prefix='$_import_dir'|' $_gzroot/$_import_dir/boot.cfg
+    cp -f $_gzroot/$_import_dir/boot.cfg $_gzroot/$_import_dir/efi/boot/boot.cfg
+    cat $_gzroot/$_import_dir/isolinux.cfg | sed -e 's|APPEND.*|APPEND -c '$_import_dir'/boot.cfg|' -e 's/DEFAULT.*/DEFAULT install/' >  $_gzroot/$_import_dir/syslinux.cfg
+
+    _deport_id=`echo $_import_dir | sed 's|/\+|/|' | sed 's|^/||' | sed 's|/|-|'`
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+    _node="/esxi/${_deport_id}"
+    _class="esxi${_version:0:1} esxi"
+    _title="$GZ_IMPORT_ESXI $_version"
+    _menu_code="
+    if [ \$grub_cpu = 'x86_64' -a \$grub_platform = 'efi' ]; then
+        chainloader $_import_dir/efi/boot/bootx64.efi
+    else
+        chainloader $_import_dir/syslinux.bin
+    fi
+    "
+    gz_menu add "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+    grep -i esxi $_grubroot/$GZ_GRUB_CFGD/root.cfg > /dev/null 2>&1 ||
+        gz_submenu add $_grubroot /esxi "$GZ_IMPORT_ESXI_MENU_TITLE"
+
+    rm $_syslinux
+    gz_cleanup_img
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gz_import_windows() {
+    _dev=$1
+    _img=$2
+    _import_dir=$3
+    _version=$4
+    _bcd_name=
+
+    _gzroot=`gz_get_dev_mnt $_dev` || gz_log_err_exit "$FUNCNAME: get root of $_dev failed"
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+
+    if [ -d "$_gzroot/sources" ]; then
+        gz_msg "Not a supported Microsoft Windows ISO"
+        gz_cleanup_dev_mnt $_gzroot
+        return 1
+    fi
+    
+    # menu_id is composed of bcdName-import-dir
+    # bcdName is composed of 3 characters with same sum of BCD, 0x42+0x43+0x44
+    # BW0,BV1,BU2,BT3,BS4,BR5,BQ6,BP7,BO8,BN9,BFA,BEB,BDC,BBE are used
+    if [ -f $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFGD/windows.cfg ]; then
+        _bcd_names="bw0 bv1 bu2 bt3 bs4 br5 bq6 bp7 bo8 bn9 bfa beb bdc bbe"
+        for _bcd_name in $_bcd_names; do
+            grep "$_bcd_name" $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFGD/windows.cfg || break
+        done
+    else
+        _bcd_name=bw0
+    fi
+
+    if [ "$_bcd_name" = "bbe" ]; then
+        if grep "$_bcd_name" $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFGD/windows.cfg > /dev/null; then
+            gz_msg "Can not find available bcd in device"
+            gz_cleanup_dev_mnt $_gzroot
+            return 1
+        fi
+    fi
+    _upper_bcd_name=`echo $_bcd_name | tr '[:lower:]' '[:upper:]'`
+
+    [ -f $_gzroot/boot/ipxe/wimboot ] || gz_download_ipxe_wimboot $_gzroot
+    if [ ! -f $_gzroot/boot/ipxe/wimboot ]; then
+        gz_msg "No wimboot available"
+        gz_cleanup_dev_mnt $_gzroot
+        return 1
+    fi
+
+    if [ ! "$_import_dir" ]; then
+        _last_n=
+        if [ -d $_gzroot/windows ]; then
+            _last_n=`ls $_gzroot/windows/ | sed -n 's/\(^[0-9]\+\)$/\1/p' | sort -uV | tail -n1`
+        fi
+        if [ "$_last_n" ]; then
+            _last_n=`expr $_last_n + 1`
+        else
+             _last_n=1
+        fi
+        _import_dir=/windows/$_last_n
+    fi
+
+    gz_msg "Extracting files from $_img ..."
+    gz_img get $_img $_gzroot/$_import_dir/sources /sources/boot.wim
+    mkdir -p $_gzroot/$_import_dir/mntdir
+    cp -f $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFG $_gzroot/$GZ_GRUB_ROOT/${GZ_GRUB_CFG}.bak
+    _win_import_dir=`echo $_import_dir | sed 's|/|\\\\|g'`
+
+    cat -<<WINPE_GRUB_CFG > $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFG
+set timeout=0
+default winpe
+menuentry 'winpe' --id winpe {
+    linux16 /boot/ipxe/wimboot
+    initrd16 newc:winpeshl.ini:$_import_dir/winpeshl.ini newc:boot.wim:$_import_dir/sources/boot.wim
+}
+WINPE_GRUB_CFG
+    cat -<<WINPESHL_INI > $_gzroot/$_import_dir/winpeshl.ini
+[LaunchApp]
+AppPath = c:$_win_import_dir\\startup.bat
+WINPESHL_INI
+    # really nightmare of windows cmd syntax
+    cat -<<STARTUP_BAT > $_gzroot/$_import_dir/startup.bat
+@echo off
+setlocal EnableDelayedExpansion
+
+c:
+if not exist c:\\efi\\microsoft\\boot (
+  mkdir \\efi\\microsoft\\boot
+  robocopy d:\\efi\\microsoft\\boot c:\\efi\\microsoft\\boot /E
+)
+
+if not exist c:\\boot\\bcd (
+  copy d:\\boot\\bcd c:\\boot\\bcd
+)
+if not exist c:\\boot\\boot.sdi (
+  copy d:\\boot\\boot.sdi c:\\boot\\boot.sdi
+)
+
+copy d:\\efi\\microsoft\\boot\\bcd c: /Y /B
+copy d:\\efi\\microsoft\\boot\\bcd c:\\efi\\microsoft\\boot\\bcd  /Y /B
+copy d:\\efi\\boot\\bootx64.efi c:\\efi\\microsoft\\boot${_bcd_name}.efi
+
+if exist bcd (
+  bcdedit /store bcd /enum | find "osdevice" > tmpdevice.txt
+  if exist tmpdevice.txt (
+    for /f "tokens=2 delims=," %%c in (tmpdevice.txt) do set uuid=%%c
+    bcdedit /store bcd /set {bootmgr} nointegritychecks yes
+    bcdedit /store bcd /set {default} device ramdisk=[boot]$_win_import_dir\\sources\\boot.wim,!uuid!
+    bcdedit /store bcd /set {default} osdevice ramdisk=[boot]$_win_import_dir\\sources\\boot.wim,!uuid!
+    del tmpdevice.txt
+  )
+  move bcd \\efi\\microsoft\\boot\\$_bcd_name
+  bcdedit /store \\efi\\microsoft\\boot\\$_bcd_name /enum
+)
+
+dism /Get-WimInfo /Wimfile:d:\\sources\\install.wim | find "Name" > c:$_win_import_dir\\version
+
+for %%I in (d:\\sources\\install.wim) do set size=%%~zI
+
+set "limit=4000000000"
+set "zeroes=000000000000"
+
+set "comp1=%zeroes%%size%"
+set "comp2=%zeroes%%limit%"
+
+if "%comp1:~-12%" gtr "%comp2:~-12%" (
+    dism /split-image /imagefile:d:\\sources\\install.wim /swmfile:c:$_win_import_dir\\sources\\install.wim /filesize:3072
+    robocopy d:\\sources c:$_win_import_dir\\sources /E /XF d:\\sources\\boot.wim d:\\sources\\install.wim
+) else (
+    robocopy d:\\sources c:$_win_import_dir\\sources /E /XF d:\\sources\\boot.wim
+)
+
+diskpart /?
+wpeutil shutdown
+STARTUP_BAT
+    gz_cleanup_img
+    gz_cleanup_dev_mnt $_gzroot
+
+    gz_log_info "Extract and modifying BCD in qemu"
+    gz_msg "Extract and modifying BCD in qemu"
+    qemu-system-`uname -m` -m 4G -smp 4 -enable-kvm -drive file=$_dev,format=raw,id=usbstick -cdrom $_img
+
+    _gzroot=`gz_get_dev_mnt $_dev` || gz_log_err_exit "$FUNCNAME: get root of $_dev failed"
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+    rm -f $_gzroot/bcd.LOG $_gzroot/EFI/microsoft/boot/*.LOG
+    mv -f $_gzroot/$GZ_GRUB_ROOT/${GZ_GRUB_CFG}.bak $_gzroot/$GZ_GRUB_ROOT/${GZ_GRUB_CFG}
+
+    _bootx64_efi=`find $_gzroot/efi -name "boot${_bcd_name}.efi"`
+    [ "$_bootx64_efi" ] || _bootx64_efi=`find $_gzroot/EFI -name "boot${_bcd_name}.efi"`
+
+    if [ -f "$_bootx64_efi" ]; then
+        # FIXME: if the B.C.D string is sepearated by 16 bytes boundary
+        _1st_hex=$(printf "%x" "'`echo $_upper_bcd_name | cut -c2`")
+        _2nd_hex=$(printf "%x" "'`echo $_upper_bcd_name | cut -c3`")
+        _bcd_line=`xxd $_bootx64_efi | grep '00 4200 4300 4400' | head -n1 | cut -d " " -f1-9`
+        _bcd_modified=`echo $_bcd_line | sed 's/00 4200 4300 4400/00 4200 '$_1st_hex'00 '$_2nd_hex'00/'`
+        echo "$_bcd_modified" | xxd -r - $_bootx64_efi
+    else
+        gz_msg "No $_bootx64_efi found after extracting $_img"
+        gz_log_err "$FUNCNAME: No $_bootx64_efi found after extracting $_img"
+        rm -rf $_gzroot/$_import_dir
+        rm -f $_gzroot/EFI/microsoft/boot/$_bcd_name
+        gz_cleanup_dev_mnt $_gzroot
+        return 1
+    fi
+
+    [ "$_version" ] || _version=`cat $_gzroot/$_import_dir/version | head -n1 | awk '{print $4}'`
+
+    # this could be wrong that we actually know the startup.bat is in c:.
+    # the first bootindex should be c so we know the install.wim is at
+    # c:$_import_dir/sources/install.wim
+    cat -<<NEW_STARTUP_BAT > $_gzroot/$_import_dir/startup.bat
+@echo off
+for %%a in (c,d,e,f) do (
+    if exist %%a:\\boot\\grub\\grub.cfg (
+        find "GYOZA" %%a:\\boot\\grub\\grub.cfg && set usbdrive=%%a
+    )
+)
+
+if "%usbdrive%" == "" (goto:eof)
+%SYSTEMDRIVE%\\sources\\setup.exe /installfrom:c:$_win_import_dir\\sources\\install.wim
+NEW_STARTUP_BAT
+
+    # try to bypass TPM and CPU check in Windows 11
+    if [ "$GZ_BYPASSTPM" ]; then
+        gz_log_info "bypass TPM requested"
+        # this could replace x:\Windows\System32\startnet.cmd
+        cat -<<NOTPM_STARTUP >> $_gzroot/$_import_dir/startup.bat
+reg add HKLM\\System\\Setup\\LabConfig /v BypassTPMCheck /t reg_dword /d 0x00000001 /f
+reg add HKLM\\System\\Setup\\LabConfig /v BypassSecureBootCheck /t reg_dword /d 0x00000001 /f
+reg add HKLM\\System\\Setup\\LabConfig /v BypassRAMCheck /t reg_dword /d 0x00000001 /f
+reg add HKLM\\System\\Setup\\LabConfig /v BypassStorageCheck /t reg_dword /d 0x00000001 /f
+reg add HKLM\\System\\Setup\\LabConfig /v BypassCPUCheck /t reg_dword /d 0x00000001 /f
+NOTPM_STARTUP
+    _wimboot_opts=newc:startup.bat:$_import_dir/startup.bat
+    fi
+
+    if [ -f $_gzroot/boot/ipxe/ipxe.efi ]; then
+        cat -<<IPXE_SCRIPT > $_gzroot/boot/ipxe/boot.ipxe
+#!ipxe
+
+ifopen
+kernel file:/boot/ipxe/wimboot gui
+initrd -n boot.sdi file:/boot/boot.sdi boot.sdi
+initrd -n boot.wim file:$_import_dir/sources/boot.wim boot.wim
+initrd -n winpeshl.ini file:$_import_dir/winpeshl.ini winpeshl.ini
+initrd -n startup.bat file:$_import_dir/startup.bat startup.bat
+boot
+IPXE_SCRIPT
+        _win_efi_cmd="chainloader /boot/ipxe/ipxe.efi ifopen chain file:/boot/ipxe/boot.ipxe"
+    elif which wimmountrw > /dev/null; then
+        mkdir -p $GZ_IMPORT_TMPROOT
+        wimmountrw $_gzroot/$_import_dir/sources/boot.wim 2 $GZ_IMPORT_TMPROOT
+        cp $_gzroot/$_import_dir/winpeshl.ini $GZ_IMPORT_TMPROOT/Windows/System32
+        wimunmount --commit $GZ_IMPORT_TMPROOT
+        _win_efi_cmd="chainloader /efi/microsoft/boot${_bcd_name}.efi"
+    else
+        gz_msg "No ipxe.efi or wimtools installed, No automatically installation of Windows in UEFI mode"
+        _win_efi_cmd="chainloader /efi/microsoft/boot${_bcd_name}.efi"
+    fi
+
+    _menu_code="
+    if [ \$grub_cpu = 'x86_64' -a \$grub_platform = 'efi' ]; then
+        $_win_efi_cmd
+    else
+        linux16 /boot/ipxe/wimboot gui
+        initrd16 newc:boot.sdi:/boot/boot.sdi newc:boot.wim:$_import_dir/sources/boot.wim newc:winpeshl.ini:$_import_dir/winpeshl.ini $_wimboot_opts
+    fi
+    "
+    _node=/windows/$_bcd_name-`echo $_import_dir | sed 's|^/||' | sed 's|/\+|/|' | sed 's|/|-|g'`
+    _title="$GZ_IMPORT_MSWINDOWS $_version"
+    _class="windows${_version} windows"
+    gz_menu add "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+
+    grep -i windows $_grubroot/$GZ_GRUB_CFGD/root.cfg > /dev/null 2>&1 ||
+        gz_submenu add $_grubroot /windows "$GZ_IMPORT_WINDOWS_MENU_TITLE"
+
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gz_cleanup_import() {
+    rmdir $GZ_IMPORT_TMPROOT 2>/dev/null
+    rmdir $GZ_IMPORT_WORKING_DIR 2>/dev/null
+}
+
+gz_import() {
+    _dev=$1
+    _img_info=$2
+
+    _img=`echo $_img_info | awk -F : '{print $1}'`
+    [ -z "$_img" ] && gz_msg "No image file for $_dev import command" && return 1
+
+    _import_dir=`echo $_img_info | awk -F : '{print $2}'`
+    echo $_import_dir | grep "-" && gz_msg "No - allowed in name of $_import_dir" && return 1
+
+    _version=`echo $_img_info | awk -F : '{print $3}'`
+
+    _dos_label=`file $_img | grep -i 'dos/mbr'`
+    if [ "$_dos_label" ]; then
+        gz_import_dos $_dev "$_img" "$_import_dir" "$_version"
+        return $?
+    fi
+
+    _esxi_label=`file $_img | sed -n "s/.*'ESXI-\(.*\)'.*/\1/p"`
+    if [ "$_esxi_label" ]; then
+        [ "$_version" ] || _version=$_esxi_label
+        [ "$_import_dir" ] || _import_dir="/esxi/${_version:0:3}"
+        gz_import_esxi $_dev $_img $_import_dir $_version
+        return $?
+    else
+        _esxi_version=`_get_esxi_version $_img`
+        if [ "$_esxi_version" ]; then
+            [ "$_import_dir" ] || _import_dir="/esxi/${_version:0:3}"
+            gz_import_esxi $_dev $_img $_import_dir $_esxi_version
+            return $?
+        fi
+    fi
+
+    _windows_label=`file $_img | awk -F "'" '{print $2}'`
+    if [ "$_windows_label" ]; then
+        gz_log_info "$FUNCNAME: Windows ISO label : $_windows_label"
+    fi
+
+    gz_import_windows $_dev $_img "$_import_dir" "$_version"
+    return $?
+}
+
+:<<UNIT_TEST
+main() {
+    source gz_logger
+    source gz_download
+    source gz_img
+    source gz_menu
+
+    gz_set_log_level $LOG_DEBUG
+
+    gz_import $*
+    gz_cleanup_import
+}
+
+main $*
+UNIT_TEST
+#exit 0

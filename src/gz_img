@@ -1,0 +1,567 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+GZ_IMG_UDISKSCTL_LOOPDEVS=
+GZ_IMG_UDISKSCTL_MNTS=
+GZ_IMG_LOOPDEVS=
+GZ_IMG_MNTS=
+GZ_IMG_WORKING_DIR=/run/user/`id -u`/gz_img_working
+GZ_IMG_MNT=$GZ_IMG_WORKING_DIR/gz_img_mnt
+GZ_IMG_CLEANUP_FILES=
+
+mkdir -p $GZ_IMG_WORKING_DIR
+
+_check_img_tools() {
+    if which udisksctl > /dev/null; then
+        _testimg=$GZ_IMG_WORKING_DIR/test.img
+        dd if=/dev/zero of=$_testimg bs=10M count=1 > /dev/null 2>&1
+        GZ_IMG_CLEANUP_FILES="$_testimg $GZ_IMG_CLEANUP_FILE"
+        /sbin/parted $_testimg mklabel msdos mkpart primary fat32 1M 100% set 1 boot on > /dev/null 2>&1
+        /sbin/mkfs.fat --offset 2048 -F 32 $_testimg > /dev/null 2>&1
+        _loopdev=`udisksctl loop-setup --file $_testimg | sed -n 's|.*\(/dev/loop[0-9]\+\).|\1|p'`
+        GZ_IMG_UDISKSCTL_LOOPDEVS="$GZ_IMG_UDISKSCTL_LOOPDEVS $_loopdev"
+
+        if [ "$_loopdev" ]; then
+            udisksctl loop-delete --block-device $_loopdev > /dev/null 2>&1
+            GZ_IMG_UDISKSCTL_LOOPDEVS="`echo $GZ_IMG_UDISKSCTL_LOOPDEVS | sed 's|'$_loopdev'||'`"
+        fi
+
+        rm $_testimg
+        GZ_IMG_CLEANUP_FILES="`echo $GZ_IMG_CLEANUP_FILES | sed 's|'$_testimg'||'`"
+
+        if [ "$_loopdev" ]; then
+            echo "_img_with_udisksctl"
+            return 0
+        fi
+    fi
+
+    which qemu-system-`uname -m` > /dev/null 2>&1 &&
+        /sbin/modinfo 9p > /dev/null 2>&1 &&
+        echo "_img_with_qemu" && return 0
+
+    [ "`id -u`" = "0" ] && echo "_img_with_root" && return 0
+
+    gz_log_err_exit "No image tools, install udisksctl, qemu-system or to be root"
+}
+
+# @param reqired_modules
+_get_all_req_modules() {
+    _req_ms=$*
+    _all_req_ms=$_req_ms
+    _prev_all_req_ms=
+
+    while [ "$_req_ms" ]; do
+        for _req_m in $_req_ms; do
+            _prev_all_req_ms=$_all_req_ms
+            _rest_req_ms=`echo $_req_ms | sed 's/'$_req_m'//'`
+            _new_req_ms="`/sbin/modinfo $_req_m | awk -F : '/depends/{print $2}' | sed 's/,/ /g'`"
+            _all_req_ms="$_all_req_ms $_new_req_ms"
+            _req_ms="`echo $_rest_req_ms $_new_req_ms`"
+        done
+    done
+
+    _all_req_ms=`echo $_all_req_ms | sed 's/ /\n/p' | sort -u`
+    echo $_all_req_ms
+}
+
+# @param qemu_initrd,qemu_exec_code,req_modules
+_create_qemu_initrd() {
+    _qemu_initrd=$1
+    _qemu_exec_code=$2
+    shift 2
+    _qemu_modules=$*
+
+    _qemu_working_dir=$GZ_IMG_WORKING_DIR/gz_img_qemu_working
+
+    if which wget > /dev/null; then
+        _wget_args="--quiet"
+        _get_url_to_stdout="wget $_wget_args --output-document=/dev/stdout"
+        _get_url_to="wget $_wget_args --output-document"
+    elif which curl > /dev/null; then
+        _curl_args="--insecure --location --silent --show-error"
+        _get_url_to_stdout="curl $_curl_args --output /dev/stdout"
+        _get_url_to="curl $_curl_args --output"
+    else
+        gz_log_err_exit "No wget or curl command available"
+    fi
+
+    _bb=$_qemu_working_dir/initramfs/bin/busybox
+    if [ ! -f "$_bb" ]; then
+        _bb_site=https://busybox.net/downloads/binaries/
+        _bb_version=`eval $_get_url_to_stdout $_bb_site | sed -n 's|.*href="\([0-9.]\+.*\)/".*|\1|p' | sort -uV | tail -n1`
+        [ "$_bb_version" ] || return 1
+        mkdir -p $_qemu_working_dir/initramfs/bin
+        echo "download busybox $_bb_version"
+        eval $_get_url_to $_bb $_bb_site/$_bb_version/busybox
+        [ -f "$_bb" ] || return 1
+        cd $_qemu_working_dir/initramfs/bin && chmod 755 busybox && ln -sf busybox sh
+    fi
+
+    cat<<INIT_CONTENT > $_qemu_working_dir/initramfs/init
+#!/bin/sh
+#https://gist.github.com/m13253/e4c3e3a56a23623d2e7e6796678b9e58
+busybox mkdir -p /etc /etc/init.d /proc /root /sbin /sys /usr/bin /usr/sbin /tmp /mnt
+/bin/busybox --install
+
+echo "::sysinit:/etc/init.d/rcS" > /etc/inittab
+echo tty1::respawn:/sbin/getty 0 tty1 >> /etc/inittab
+echo tty2::respawn:/sbin/getty 0 tty2 >> /etc/inittab
+echo ttyS0::respawn:/sbin/getty -L ttyS0 9600 vt100 >> /etc/inittab
+echo "::restart:/sbin/init" >> /etc/inittab
+# Stuff to do before rebooting
+echo "::ctrlaltdel:/sbin/reboot" >> /etc/inittab
+echo "::shutdown:/bin/umount -a -r" >> /etc/inittab
+echo "::shutdown:/sbin/swapoff -a" >> /etc/inittab
+echo "#!/bin/sh" > /etc/init.d/rcS
+echo "poweroff" >> /etc/init.d/rcS
+chmod 755 /etc/init.d/rcS
+echo >> /etc/issue
+echo root::0:0:root:/root:/bin/sh > /etc/passwd
+busybox mount -t devtmpfs none /dev
+busybox mount -t proc proc /proc
+busybox mount -t sysfs sys /sys
+busybox mdev -s
+hostname localhost
+ip link set lo up
+echo 5 > /proc/sys/kernel/printk
+
+$(cat $_qemu_exec_code)
+
+exec /linuxrc
+INIT_CONTENT
+
+    [ "$_qemu_modules" ] || _qemu_modules="9p 9pnet_virtio ata_piix sd_mod sr_mod loop cdrom isofs vfat nls_cp437 nls_ascii"
+    _qemu_modules=`_get_all_req_modules "$_qemu_modules"`
+    cd $_qemu_working_dir/initramfs
+    for _req_module in $_qemu_modules; do
+        _m_path=`find /lib/modules/$(uname -r)/kernel/ -name ${_req_module}.ko`
+        _m_work_dir=`dirname $(echo $_m_path | sed 's|^/||')`
+        mkdir -p $_m_work_dir
+        cp -f $_m_path $_m_work_dir
+    done
+    cp /lib/modules/$(uname -r)/modules.dep* lib/modules/$(uname -r)
+
+    chmod 755 $_qemu_working_dir/initramfs/init
+    find . | sort | cpio -o -H newc -R 0:0 | gzip -9 > $_qemu_initrd
+    [ -f "$_qemu_initrd" ] || return 1
+}
+
+_img_with_qemu() {
+    _action="$1"
+    _img="$2"
+    _destdir="$3"
+    shift 3
+    _files="$*"
+
+    _mnt_imgdir=mnt_imgdir
+    _mnt_filedir=mnt_filedir
+    _files=`echo $_files | sed 's|/\+|/|g'`
+    if [ "$_action" = "get" ]; then
+        _filedir=$_destdir
+        mkdir -p $_filedir
+    else
+        _imgroot=$GZ_IMG_WORKING_DIR/filedir
+        for _file in $_files; do
+            [ $_file = "/" ] && _file="."
+            mkdir -p $_imgroot/`dirname $_file`
+            cp -r $_file $_imgroot/$_file
+        done
+        _filedir=$GZ_IMG_WORKING_DIR/filedir
+    fi
+    _img_name=`basename $_img`
+    _qemu_initrd="$GZ_IMG_WORKING_DIR/qemu_initrd/$_img_name/qemu_initrd.gz"
+    _qemu_code="$GZ_IMG_WORKING_DIR/$_img_name/qemu_code"
+    mkdir -p `dirname $_qemu_initrd`
+    mkdir -p `dirname $_qemu_code`
+    cat <<QEMU_CODE > $_qemu_code
+modprobe virtio_pci
+modprobe virtio
+modprobe 9p
+modprobe ata_piix
+modprobe sd_mod
+modprobe sr_mod
+modprobe loop
+modprobe nls_cp437
+modprobe nls_ascii
+modprobe vfat
+modprobe isofs
+
+mkdir -p /$_mnt_imgdir /$_mnt_filedir /mnt_imgroot
+mount -t 9p -o trans=virtio $_mnt_imgdir /$_mnt_imgdir -oversion=9p2000.L
+mount -t 9p -o trans=virtio $_mnt_filedir /$_mnt_filedir -oversion=9p2000.L
+
+imgfile=\$(find /mnt_imgdir -name $_img_name)
+
+if [ "\$imgfile" ]; then
+    losetup -P -f \$imgfile
+    loopdev=\$(losetup -a | awk -F : '{print \$1}')
+    mdev -s
+
+    if [ -b \${loopdev}p1 ]; then
+        pdevs=`ls \${loopdev}p*`
+    else
+        pdevs=\$loopdev
+    fi
+
+    for pdev in \$pdevs; do
+        mount \$pdev /mnt_imgroot || break
+        for file in $_files; do
+            if [ "$_action" = "get" ]; then
+                [ "\$file" = "/" ] && file="."
+                [ -e /mnt_imgroot/\$file ] && cp -rf /mnt_imgroot/\$file /$_mnt_filedir
+            else
+                mkdir -p /mnt_imgroot/\$(dirname \$file)
+                [ -e /$_mnt_filedir/\$file ] && cp -rf /$_mnt_filedir/\$file /mnt_imgroot/\$file
+            fi
+        done
+        umount \$pdev
+    done
+else
+    if mount /dev/sr0 /mnt_imgroot; then
+        for file in $_files; do
+            if [ "$_action" = "get" ]; then
+                [ -e /mnt_imgroot/\$file ] && cp -rf /mnt_imgroot/\$file /$_mnt_filedir
+            fi
+        done
+    fi
+fi
+
+umount /$_mnt_filedir
+QEMU_CODE
+
+    _create_qemu_initrd "$_qemu_initrd" "$_qemu_code" || return 1
+    GZ_IMG_CLEANUP_FILES="$GZ_IMG_CLEANUP_FILES $_qemu_code $_qemu_initrd"
+    file $_img | grep -i "9660" > /dev/null && _qemu_cdrom="-cdrom $_img"
+    #-virtfs local,path=/path/to/share,mount_tag=host0,security_model=mapped,id=host0
+    qemu-system-`uname -m` -m 2g -smp 2 -enable-kvm \
+        -nographic \
+        -kernel /boot/vmlinuz-$(uname -r) \
+        -initrd $_qemu_initrd \
+        -virtfs local,path=`dirname $_img`,mount_tag=$_mnt_imgdir,security_model=mapped,id=$_mnt_imgdir \
+        -virtfs local,path=$_filedir,mount_tag=$_mnt_filedir,security_model=mapped,id=$_mnt_filedir \
+        $_qemu_cdrom
+        #-fsdev local,security_model=mapped,id=fsdev0,path=`dirname $_img` \
+        #-device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=$_mnt_imgdir \
+        #-fsdev local,security_model=mapped,id=fsdev1,path=$_filedir \
+        #-device virtio-9p-pci,id=fs1,fsdev=fsdev1,mount_tag=$_mnt_filedir \
+    rm -f $_qemu_code $_qemu_initrd
+    GZ_IMG_CLEANUP_FILES="`echo $GZ_IMG_CLEANUP_FILES | sed 's|'$_qemu_code'||'| sed 's|'$_qemu_initrd'||'`"
+}
+
+_img_with_udisksctl() {
+    _action="$1"
+    _img="$2"
+    _destdir="$3"
+    shift 3
+    _files="$*"
+
+    _loopdev=`udisksctl loop-setup --file $_img | sed 's|.*\(/dev/loop[0-9]\+\).*|\1|'`
+    [ "$_loopdev" ] || return 1
+    GZ_IMG_UDISKSCTL_LOOPDEVS="$GZ_IMG_UDISKSCTL_LOOPDEVS $_loopdev"
+    gz_log_debug "$FUNCNAME: _loopdev -> $_loopdev"
+
+    if [ -b ${_loopdev}p1 ]; then
+        _pdevs=`ls ${_loopdev}p*`
+    else
+        _pdevs=${_loopdev}
+    fi
+    _file_not_copied="$_files"
+    for _pdev in $_pdevs; do
+        _img_mnt="`udisksctl mount --block-device $_pdev 2>/dev/null | sed -n 's|Mounted '$_pdev' at \(.*\)|\1|p'`"
+        [ "$_img_mnt" ] || continue
+        GZ_IMG_UDISKSCTL_MNTS="$GZ_IMG_UDISKSCTL_MNTS $_img_mnt"
+        gz_log_debug "$FUNCNAME: $_img mnt -> $_img_mnt"
+
+        _files=`echo $_files | sed 's|/\+|/|g'`
+        for _file in $_files; do
+            if [ "$_action" = "get" ]; then
+                [ "$_file" = "/" ] && _file="."
+                mkdir -p $_destdir
+                [ -e "$_img_mnt"/$_file ] && cp -rf --no-preserve=mode,ownership "$_img_mnt"/$_file $_destdir
+            elif [ "$_action" = "put" ]; then
+                mkdir -p "$_img_mnt"/$_destdir
+                [ -e "$_file" ] && cp -rf --no-preserve=mode,ownership $_file "$_img_mnt"/$_destdir
+            fi
+            _file_not_copied=`echo $_file_not_copied | sed 's|'$_file'||'`
+        done
+        udisksctl unmount --block-device $_pdev > /dev/null
+        GZ_IMG_UDISKSCTL_MNTS=`echo $GZ_IMG_UDISKSCTL_MNTS | sed 's|'"$_img_mnt"'||'`
+        [ "$_file_not_copied" ] || break
+    done
+
+    udisksctl loop-delete --block-device $_loopdev
+    GZ_IMG_UDISKSCTL_LOOPDEVS=`echo $GZ_IMG_UDISKSCTL_LOOPDEVS | sed 's|'$_loopdev'||'`
+}
+
+_img_with_root() {
+    _action="$1"
+    _img="$2"
+    _destdir="$3"
+    shift 3
+    _files="$*"
+
+    _img_mnt=$GZ_IMG_WORKING_DIR/$(basename $_img)
+    mkdir -p $_img_mnt
+
+    _loopdev=$(/sbin/losetup --partscan --show --find $_img)
+    [ "$_loopdev" ] || return 1
+    GZ_IMG_LOOPDEVS="$GZ_IMG_LOOPDEVS $_loopdev"
+    gz_log_debug "$FUNCNAME: $_img _loopdev -> $_loopdev"
+
+    if [ -b ${_loopdev}p1 ]; then
+        _pdevs=`ls ${_loopdev}p*`
+    else
+        _pdevs=${_loopdev}
+    fi
+    _file_not_copied="$_files"
+    for _pdev in $_pdevs; do
+        mount $_pdev $_img_mnt 2>/dev/null || continue
+        GZ_IMG_MNTS="$GZ_IMG_MNTS $_pdev"
+        gz_log_debug "$FUNCNAME: $_img mnt -> $_img_mnt"
+
+        _files=`echo $_files | sed 's|/\+|/|g'`
+        for _file in $_files; do
+            if [ "$_action" = "get" ]; then
+                [ "$_file" = "/" ] && _file="."
+                mkdir -p $_destdir
+                [ -e "$_img_mnt/$_file" ] && cp -rf --no-preserve=mode,ownership $_img_mnt/$_file $_destdir
+            elif [ "$_action" = "put" ]; then
+                mkdir -p $_img_mnt/$_destdir
+                [ -e "$_file" ] && cp -rf --no-preserve=mode,ownership $_file $_img_mnt/$_destdir
+            fi
+            _file_not_copied=`echo $_file_not_copied | sed 's|'$_file'||'`
+        done
+        umount $_pdev
+        GZ_IMG_MNTS=`echo $GZ_IMG_MNTS | sed 's|'$_img_mnt'||'`
+        [ "$_file_not_copied" ] || break
+    done
+
+    /sbin/losetup -d $_loopdev
+    GZ_IMG_LOOPDEVS=`echo $GZ_IMG_LOOPDEVS | sed 's|'$_loopdev'||'`
+
+    return 0
+}
+
+gz_cleanup_dir() {
+    _child_dir=$1
+    _cleanup_dir=$2
+
+    if ! echo $_child_dir | grep "$_cleanup_dir" > /dev/null; then
+        gz_log_debug "$FUNCNAME: cleanup_dir -> $_cleanup_dir child_dir -> $_child_dir"
+        return 1
+    fi
+
+    _rmdir=$_child_dir
+    while [ "$_rmdir" != "$_cleanup_dir" ]; do
+        if [ "`ls -A $_rmdir`" ]; then
+            break
+        else
+            rmdir $_rmdir 2>/dev/null
+        fi
+        _rmdir=`dirname $_rmdir`
+    done
+}
+
+# @param action,img,destdir,files
+gz_img() {
+    _action="$1"
+    _img="$2"
+    _destdir="$3"
+    shift 3
+    _files="$*"
+
+    [ $_action = "get" -o $_action = "put" ] || return 1
+    [ -f "$_img" ] || return 1
+    [ "$_files" ] || return 1
+
+    _mounted=$(/sbin/losetup | grep `realpath $_img`)
+    if [ "$_action" = "put" -a "$_mounted" ]; then
+        gz_msg "Abort image put action due to $_img mounted on $_mounted."
+        return 1
+    fi
+
+    _img_cmd=$(_check_img_tools)
+    gz_log_info "$FUNCNAME: $_img_cmd"
+    [ "$_img_cmd" ] && eval "$_img_cmd" "$_action" "$_img" "$_destdir" "$_files"
+}
+
+gz_cleanup_img() {
+    for _file in $GZ_IMG_CLEANUP_FILES; do
+        rm $_file
+    done
+    for _loopdev in $GZ_IMG_LOOPDEVS; do
+        _img_cmd=$(_check_img_tools)
+        if [ "$_img_cmd" = "_img_with_udisksctl" ]; then
+            for _img_mnt in $GZ_IMG_MNTS; do
+                udisksctl unmount --block-device $_loopdev > /dev/null
+            done
+            udisksctl loop-delete --block-device $_loopdev
+        elif [ "$_img_cmd" = "_img_with_root" ]; then
+            for _img_mnt in $GZ_IMG_MNTS; do
+                umount $_img_mnt
+            done
+            /sbin/losetup -d $_loopdev
+        fi
+    done
+}
+
+# @param device
+gz_get_dev_mnt() {
+    _device=$1
+    _device=`echo $_device | sed 's|/\+|/|'`
+    _bdev=`basename $_device`
+    _gz_mnt=$GZ_IMG_MNT
+    mkdir -p $_gz_mnt
+
+    trap "gyoza_cleanup_dev_mnt" INT
+
+    if [ "$_device" != "/" -a -d "$_device" -a -d $_device/boot/grub ]; then
+        echo $_device
+        return 0
+    elif [ -b "/dev/$_bdev" ]; then
+        if [ "`id -u`" != 0 ]; then
+            gz_log_stderr "Need root privilege to access device"
+            return 1
+        else
+            # possible device /dev/sdc sdc loop0
+            _loopdev=`echo /dev/$_bdev | grep 'loop'`
+            if [ "$_loopdev" ]; then
+                _pdev=/dev/${$_bdev}p1
+            else
+                _pdev=/dev/${_bdev}1
+            fi
+
+            _mounted=`cat /proc/mounts | awk '/'$(basename ${_pdev})'/{print $2}'`
+            if [ "$_mounted" ]; then
+                if [ -d $_mounted -a $_mounted != "/" -a -d $_mounted/boot/grub ]; then
+                    echo $_mounted
+                    return 0
+                fi
+            fi
+
+            if mount ${_pdev} $_gz_mnt > /dev/null 2>&1; then
+                if [ -d "$_gz_mnt" -a -d $gz_mnt/boot/grub ]; then
+                    echo $_gz_mnt
+                    return 0
+                else
+                    umount $_pdev
+                    GZ_IMG_MNTS="`echo $GZ_IMG_MNTS| sed 's|'$_gz_mnt'||'`"
+                    gz_log_stderr "$_device is not a grub device"
+                    return 1
+                fi
+            else
+                gz_log_stderr "Can not mount $_device"
+                return 1
+            fi
+        fi
+    elif [ -f "$_device" ]; then
+        _gz_img_cmd=$(_check_img_tools)
+        gz_log_debug "$FUNCNAME: image command $_gz_img_cmd"
+        if [ "$_gz_img_cmd" = "_img_with_udisksctl" ]; then
+            _loopdev=`udisksctl loop-setup --file $_device | sed 's|.*\(/dev/loop[0-9]\+\).*|\1|'`
+            [ "$_loopdev" ] || gz_log_err_exit "Can not setup loop device for $_device with udisksctl"
+            GZ_IMG_UDISKSCTL_LOOPDEVS="$GZ_IMG_UDISKSCTL_LOOPDEVS $_loopdev"
+            _img_mnt="`udisksctl mount --block-device ${_loopdev}p1 2> /dev/null | sed -n 's|Mounted '${_loopdev}p1' at \(.*\)|\1|p'`"
+            if [ "$_img_mnt" ]; then
+                GZ_IMG_UDISKSCTL_MNTS="$GZ_IMG_UDISKSCTL_MNTS $_loopdev"
+                echo $_img_mnt
+                return 0
+            else
+                udisksctl loop-delete --block-device $_loopdev > /dev/null 2>&1
+                GZ_IMG_UDISKSCTL_LOOPDEVS="`echo $GZ_IMG_UDISKSCTL_LOOPDEVS | sed 's|'$_loopdev'||'`"
+                gz_log_stderr "Can not mount $_device with udisksctl"
+                return 1
+            fi
+        elif [ "$_gz_img_cmd" = "_img_with_root" ]; then
+            _loopdev=`/sbin/losetup --partscan --show --scan $_device`
+            [ "$_loopdev" ] || gz_log_err_exit "Can not setup loop device for $_device with root privilege"
+            GZ_IMG_LOOPDEVS="$GZ_IMG_LOOPDEVS $_loopdev"
+            if mount ${_loopdev}p1 $_gz_mnt > /dev/null 2>&1; then
+                GZ_IMG_MNTS="$GZ_IMG_MNTS $_gz_mnt"
+                echo $_gz_mnt
+                return 0
+            else
+                /sbin/losetup -d $_loopdev
+                GZ_IMG_LOOPDEVS="`echo $GZ_IMG_LOOPDEVS | sed 's|'$_loopdev'||'`"
+                gz_log_stderr "Can not mount $_device with root privilege"
+                return 1
+            fi
+        else
+            gz_log_stderr "Need root or udisksctl tool to mount the image"
+            return 1
+        fi
+    fi
+    gz_log_stderr "Can not find root directory of device, $_device"
+    return 1
+}
+
+gz_cleanup_dev_mnt() {
+    _gzroot=$1
+
+    gz_log_debug "$FUNCNAME: passed in $_gzroot"
+    if [ -d "$_gzroot" ]; then
+        _pdev=`cat /proc/mounts | grep "$_gzroot" | awk '{print $1}'`
+        if [ "$_pdev" ]; then
+            _bdevice="`echo $_pdev | sed -n 's|\(.*loop[0-9]\+\).*|\1|p'`"
+            [ "$_bdevice" ] || _bdevice="`echo $_pdev | sed -n 's|\(.*nvme[0-9]\+\).*|\1|p'`"
+            [ "$_bdevice" ] || _bdevice="`echo $_pdev | sed -n 's|\(.*sd[a-z]+\).*|\1|p'`"
+            [ "$_bdevice" ] || _bdevice="`echo $_pdev | sed -n 's|\(.*hd[a-z]+\).*|\1|p'`"
+            if [ "`id -u`" = "0" ]; then
+                umount $_pdev > /dev/null 2>&1
+                /sbin/losetup -d $_bdevice > /dev/null 2>&1
+            else
+                udisksctl unmount --block-device $_pdev > /dev/null 2>&1
+                udisksctl loop-delete --block-device $_bdevice > /dev/null 2>&1
+            fi
+        fi
+    fi
+
+    [ "`ls -A $GZ_IMG_MNT`" ] && umount $GZ_IMG_MNT 2>/dev/null
+    for _mnt in $GZ_IMG_MNTS; do
+        umount $_mnt 2>/dev/null
+    done
+    for _loopdev in $GZ_IMG_LOOPDEVS; do
+        /sbin/losetup -d $_loopdev 2>/dev/null
+    done
+
+    for _mnt in $GZ_IMG_UDISKSCTL_MNTS; do
+        udisksctl unmount --block-device $_mnt 2>/dev/null
+    done
+    for _loopdev in $GZ_IMG_UDISKSCTL_LOOPDEVS; do
+        udisksctl loop-delete --block-device $_loopdev 2>/dev/null
+    done
+}
+
+:<<UNIT_TEST
+# @param action,img,destdir,files
+main() {
+    source gz_logger
+    trap "gz_cleanup_img" INT
+    gz_set_log_level $LOG_DEBUG
+
+    action=$1
+    isofile=$2
+    destdir=$3
+    shift 3
+    files=$*
+    gz_img "$action" "$isofile" "$destdir" "$files"
+    gz_cleanup_img
+}
+
+main $*
+UNIT_TEST

@@ -1,0 +1,206 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+# @param gzroot
+_extract_archlinux() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "arch" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/archlinux
+    _files="/arch/boot/x86_64/vmlinuz-linux /arch/boot/x86_64/initramfs-linux.img \
+        /arch/boot/intel-ucode.img /arch/boot/amd-ucode.img"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_debian() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "debian" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/debian
+    _files="/live/vmlinuz /live/initrd.img"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_endeavouros() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "endeavouros" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/endeavouros
+    _files="/arch/boot/x86_64/vmlinuz-linux /arch/boot/intel-ucode.img \
+        /arch/boot/amd-ucode.img /arch/boot/x86_64/initramfs-linux.img"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_fedora() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "fedora" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/fedora
+    _files="/images/pxeboot/vmlinuz /images/pxeboot/initrd.img"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_kali() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "kali" 2>/dev/null` || return 1
+    _destdir=$_gzroot
+    _files="/live"
+
+    gz_msg "Wait for extracting files from $_isofile ..."
+    gz_img get "$_isofile" "$_destdir" "$_files"
+    stat -c "%s" $_isofile > $_isofile.size
+    rm -f $_isofile
+}
+
+_extract_kubuntu() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "kubuntu" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/kubuntu
+    _files="/casper/vmlinuz /casper/initrd"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_mageia() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "mageia" 2>/dev/null` || return 1
+    _destdir=$_gzroot
+    _files="/loopbacks"
+
+    gz_msg "Wait for extracting files from $_isofile ..."
+    gz_img get "$_isofile" "$_destdir" "$_files"
+    stat -c "%s" $_isofile > $_isofile.size
+    rm -f $_isofile
+}
+
+_extract_manjaro() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "manjaro" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/manjaro
+    _files="/boot/vmlinuz-x86_64 /boot/amd_ucode.img /boot/intel_ucode.img /boot/initramfs-x86_64.img"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_mx() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "mx" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/mx
+    _files="/antiX/vmlinuz /antiX/initrd.gz"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_opensuse() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "opensuse" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/opensuse
+    _files="/boot/x86_64/loader/linux /boot/x86_64/loader/initrd"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_pearl() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "pearl" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/pearl
+    _files="/casper/vmlinuz /casper/initrd.gz"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_steamos() {
+    _gzroot=$1
+    _isofile=`find $_gzroot -name "*.iso" | grep -i "holo" 2>/dev/null` || return 1
+    _destdir=$_gzroot/linux/liveiso/steamos
+    _files="/arch/boot/x86_64/vmlinuz-linux /arch/boot/x86_64/initramfs-linux.img \
+        /arch/boot/intel-ucode.img /arch/boot/amd-ucode.img"
+
+    gz_img get "$_isofile" "$_destdir" "$_files"
+}
+
+_extract_freebsd() {
+    :
+}
+
+_extract_omnios() {
+    :
+}
+
+_extract_freedos() {
+    _gzroot=$1
+    _zipfiles=`find $_gzroot/dos -name "*.zip" | grep 'FD[0-9]\+.*'`
+    _destdir=$_gzroot/dos
+    for _zipfile in $_zipfiles; do
+        _postfix_fname=$(echo $_zipfiles | sed 's/FD[0-9]\+\(.*\).zip/\1/')
+        rm $_filedir/.*${_postfix_fname}.img 2>/dev/null
+        mkdir -p $_destdir
+        gzip -d -c $_zipfile > $_destdir/`basename $_zipfile .zip`.img 2>/dev/null
+        stat -c "%s" $_zipfile > $_zipfile.size
+        rm $_zipfile
+    done
+}
+
+# @param gzroot,distros-info
+gz_extract_distros() {
+    _gzroot=$1; shift
+    _distros_info=$*
+
+
+    gz_log_debug "$FUNCNAME: $_distros_info passed in"
+    _distros_info=`echo $_distros_info | sed 's/+/ /g'`
+    gz_distros_parse $_distros_info || return 1
+
+    for _distro_info in $_distros_info; do
+        _distro=`echo $_distro_info | awk -F : '{print $1}'`
+        _type=`echo $_distro_info | awk -F : '{print $2}'`
+        [ "$_distro" = "freedos" ] && continue
+
+        if [ -z "$_type" -o "`echo $_type | grep liveiso`" ]; then
+            _liveiso_supported=$(eval echo \$${_distro}_type | grep liveiso)
+        else
+            _liveiso_supported=
+        fi
+        if [ ! "$_liveiso_supported" ]; then
+            _distros_info=`echo $_distros_info | sed 's|'$_distro_info'||'`
+        fi
+    done
+
+    for _distro in `echo $_distros_info | awk -F : '{print $1}'`; do
+        eval _extract_$_distro $_gzroot
+    done
+}
+
+gz_cleanup_extract() {
+    gz_cleanup_img
+}
+
+:<<UNIT_TEST
+# @param gzroot,distros-info
+main() {
+    source gz_logger
+    source gz_img
+    source gz_download
+    gz_set_log_level $LOG_DEBUG
+    trap 'gz_cleanup_extract' INT
+
+    gz_extract_distros $*
+}
+
+main $*
+UNIT_TEST

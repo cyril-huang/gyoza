@@ -1,0 +1,149 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+GZ_DEV_WORKING_DIR=/tmp/gz_dev_working
+GZ_DEV_MIN_SIZE=200M
+GZ_DEV_MNT=$GZ_DEV_WORKING_DIR/devmnt
+GZ_DEV_LOOPDEV=
+GZ_DEV_FAT32_LABEL=GYOZA
+
+# @param dd_bs_size number
+_get_ddbs_cnt() {
+    _ddbs_size=$1
+    _req_size=$2
+
+    _ddbs_size=`numfmt --from=iec $_ddbs_size`
+    _req_size=`numfmt --from=iec $_req_size`
+    _cnt=`expr $_req_size / $_ddbs_size`
+    echo `expr $_cnt + 1`
+}
+
+# @param device size
+gz_create() {
+    _device=$1
+    [ "$_device" ] || return 1
+    _size=$2
+    [ "$_size" ] || _size=$GZ_DEV_MIN_SIZE
+    _fat32_label=$3
+    [ "$_fat32_label" ] || _fat32_label=$GZ_DEV_FAT32_LABEL
+
+    [ "`id -u`" = "0" ] || gz_log_err_exit "Need root privilege to access device"
+
+    read -p "Will wipeout the $_device (Y/N) " _wipeout
+    if [ ! "`echo $_wipeout | sed -n '/[Yy]\([Ee][Ss]\?\)\?/p'`" ]; then
+        exit 0
+    fi
+
+    _bdev=`basename $_device`
+    if [ -b /dev/$_bdev ]; then
+        _pdev=/dev/${_bdev}1
+        _mnts=`cat /proc/mounts | awk /$_bdev/'{print $1}'`
+        for _mnt in $_mnts; do
+            if [ $_mnt = "/" -o $_mnt = "/home" -o $_mnt = "/tmp" -o $_mnt = "/var" -o "`echo $_mnt | grep '^/usr/'`" ]; then
+                gz_msg "system directory mounted on /dev/$_bdev"
+                cat /proc/mounts | grep ${_bdev}
+                exit 0
+            else
+                umount $_mnt
+            fi
+        done
+        _bdev=/dev/$_bdev
+
+        # force to close the usb again if it's eject by GUI application
+        which eject >/dev/null && eject -t $_bdev
+    else
+        [ -f "$_device" ] && rm $_device
+        [ -f "$_device" ] && gz_log_err_exit "Can not write/remove $_device"
+
+        if which qemu-img > /dev/null 2>&1; then
+            qemu-img create -f raw $_device $_size
+        else
+            dd if=/dev/zero of=$_device bs=1M count=`_get_ddbs_cnt 1M $_size` status=progress
+        fi
+        _loopdev=`/sbin/losetup --partscan --find --show  $_device`
+        gz_log_debug "$FUNCNAME: _loopdev -> $_loopdev"
+        [ "$_loopdev " ] || gz_log_err_exit "Can not create loop device for $_device"
+        GZ_DEV_LOOPDEV=$_loopdev
+        _bdev=${_loopdev}
+        _pdev=${_loopdev}p1
+    fi
+
+    if [ -x /sbin/parted ]; then
+        /sbin/parted -s $_bdev mklabel msdos mkpart primary fat32 1M 100% set 1 boot on > /dev/null
+    elif [ -x /sbin/fdisk ]; then
+        sed -e 's/\s*\([\+0-9a-zA-Z]*\).*/\1/' << FDISK_CMD | /sbin/fdisk ${_bdev}
+o
+n
+p
+1
+2048
+
+a
+t
+c
+w
+q
+FDISK_CMD
+    else
+        gz_log_err_exit "No partition tools found"
+    fi
+    [ -b $_pdev ] || gz_log_err_exit "No partition created, check if USB device is ejected"
+    /sbin/mkfs.fat -F 32 -n $_fat32_label $_pdev
+    mkdir -p $GZ_DEV_MNT
+    if mount $_pdev $GZ_DEV_MNT; then
+        [ -d /usr/lib/grub/i386-pc ] &&
+            /sbin/grub-install --boot-directory=$GZ_DEV_MNT/boot --allow-floppy $_bdev
+        [ -d /usr/lib/grub/x86_64-efi ] &&
+            /sbin/grub-install --boot-directory=$GZ_DEV_MNT/boot --efi-directory=$GZ_DEV_MNT --target=x86_64-efi --no-nvram --removable
+
+        # make debian happy
+        mkdir -p $GZ_DEV_MNT/.disk && touch $GZ_DEV_MNT/.disk/info
+
+        _capacity=`df | grep $_pdev | awk '{print $4}'`
+        [ "$_capacity" ] && _capacity=`expr $_capacity \* 1024`
+        gz_msg "Device $_device capacity $(numfmt --to=iec $_capacity)"
+    else
+        gz_msg "Filesystem not created or not mounted"
+        return 1
+    fi
+}
+
+gz_cleanup_create() {
+    if [ "$GZ_DEV_LOOPDEV" ]; then
+        [ "`/sbin/losetup | grep $GZ_DEV_LOOPDEV`" ] && /sbin/losetup -d $GZ_DEV_LOOPDEV
+    fi
+    _dev_mnted=`cat /proc/mounts | grep $_pdev | awk '{print $2}'`
+    if [ "$_dev_mnted" = "$GZ_DEV_MNT" ]; then
+        umount $GZ_DEV_MNT
+        rmdir $GZ_DEV_MNT
+        rmdir $GZ_DEV_WORKING_DIR
+    fi
+}
+
+:<<UNIT_TEST
+# @param device,size,fat32_label
+main() {
+    source gz_logger
+    trap "gz_cleanup_create" INT
+
+    [ "$*" ] || gz_log_err_exit "No device specified"
+    gz_create $*
+    gz_cleanup_create
+}
+main $*
+UNIT_TEST

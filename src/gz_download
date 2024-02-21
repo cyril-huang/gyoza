@@ -1,0 +1,892 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+GZ_DOWNLOAD_AVAILABLE_SPACE=
+GZ_DOWNLOAD_DISTROS_ALL="
+almalinux
+archlinux
+debian
+endeavouros
+fedora
+kali
+kubuntu
+linuxmint
+mageia
+manjaro
+mx
+opensuse
+pearl
+rocky
+steamos
+ubuntu
+openbsd
+netbsd
+omnios
+freedos
+"
+
+almalinux_type=netboot
+alpine_type=netboot
+archlinux_type=liveiso
+debian_type=liveiso,netboot
+endeavouros_type=liveiso
+fedora_type=liveiso,netboot
+kali_type=netboot
+kubuntu_type=liveiso
+linuxmint_type=liveiso
+mageia_type=liveiso
+manjaro_type=liveiso
+mx_type=liveiso
+opensuse_type=liveiso
+pearl_type=liveiso
+rocky_type=netboot
+steamos_type=liveiso
+ubuntu_type=netboot
+openbsd_type=netboot
+netbsd_type=netboot
+omnios_type=liveiso
+freedos_type=fullusb,liteusb
+
+_check_download_tools() {
+    if which wget > /dev/null; then
+        _wget_args="--quiet"
+        _get_url_to_stdout="wget $_wget_args --output-document=/dev/stdout"
+        _get_url_header="wget $_wget_args --server-response --spider --tries 1 --output-document=/dev/stdout"
+        _get_url_to="wget $_wget_args --output-document"
+    elif which curl > /dev/null; then
+        _curl_args="--insecure --location --silent --show-error"
+        _get_url_to_stdout="curl $_curl_args"
+        _get_url_header="curl $_curl_args --head"
+        _get_url_to="curl $_curl_args --output"
+    else
+        gz_log_err_exit "No wget or curl command available"
+    fi
+}
+
+gz_url_to_stdout() {
+    [ "$_get_url_to_stdout" ] || _check_download_tools
+    gz_log_debug "run $_get_url_to_stdout $*"
+    eval $_get_url_to_stdout $*
+}
+
+gz_url_header() {
+    [ "$_get_url_header" ] || _check_download_tools
+    gz_log_debug "run $_get_url_header $*"
+    eval $_get_url_header $*
+}
+
+gz_url_to() {
+    [ "$_get_url_to" ] || _check_download_tools
+    gz_log_debug "run $_get_url_to $*"
+    eval $_get_url_to $*
+}
+
+gz_download_ipxe_wimboot() {
+    _download_root=$1
+
+    _wimboot_site=https://github.com/ipxe/wimboot/releases
+    _wimboot_url=`gz_url_to_stdout $_wimboot_site | sed -n 's/.*href="\(http.*wimboot\)".*/\1/p' | head -n1`
+    [ "$_wimboot_url" ] || return 1
+    mkdir -p $_download_root/boot/ipxe
+    gz_url_to $_download_root/boot/ipxe/wimboot $_wimboot_url
+
+    _ipxe_site=https://boot.ipxe.org
+    _ipxe_efi=ipxe.efi
+    gz_url_to $_download_root/boot/ipxe/ipxe.efi $_ipxe_site/$_ipxe_efi
+}
+
+gz_download_memdisk() {
+    _download_root=$1
+
+    gz_msg "download memdisk root: $_download_root"
+    _memdisk=$_download_root/boot/syslinux/4.07/bin/memdisk
+    _syslinux=https://mirrors.edge.kernel.org/pub/linux/utils/boot/syslinux/syslinux-4.07.tar.gz
+
+    mkdir -p syslinux-4.07/memdisk && mkdir -p `dirname $_memdisk`
+    gz_url_to_stdout $_syslinux | tar zxvf - syslinux-4.07/memdisk/memdisk
+    mv syslinux-4.07/memdisk/memdisk $_memdisk > /dev/null 2>&1
+    rm -rf syslinux-4.07
+}
+
+# @param title,url,filepath
+gz_general_download() {
+    _title=$1
+    _url=$2
+    _filepath=$3
+
+    _content_length=`gz_url_header $_url 2>&1 | grep -i 'Content-Length' | awk -F : '{print $2}' | sed 's/\r//g'`
+
+    if [ ! "$_content_length" ]; then
+        _title="Network error: Get $_title Error"
+        gz_draw_info_add "$_title" "$_filepath" "0"
+        return 0
+    fi
+
+    if [ -f "$_filepath" ]; then
+        _curr_size=`stat -c "%s" $_filepath`
+    elif [ -f "$_filepath.size" ]; then
+        _curr_size=`cat $_filepath.size`
+    else
+        _curr_size=0
+    fi
+
+    gz_log_debug "$FUNCNAME: curr size: $_filepath $_curr_size content length: $_content_length"
+    if [ $_curr_size -eq $_content_length ]; then
+        _title="$_title is the same as pervious version"
+        gz_draw_info_add "$_title" "$_filepath" "$_curr_size"
+        return 0
+    fi
+
+    if [ "$_content_length" -gt 4294000000 ] ;then
+        _title="$_title File size: $_content_length exceeds FAT32 4G limit"
+        gz_draw_info_add "$_title" "$_filepath" "0"
+        return 0
+    fi
+
+    if [ "$GZ_DOWNLOAD_AVAILABLE_SPACE" ]; then
+        if [ "$_content_length" -gt "$GZ_DOWNLOAD_AVAILABLE_SPACE" ]; then
+            _title="$_title File size: $_content_length exceeds device available space: $GZ_DOWNLOAD_AVAILABLE_SPACE"
+            gz_draw_info_add "$_title" "$_filepath" "0"
+            return 0
+        fi
+    fi
+
+    _filename=`basename $_filepath`
+    _filedir=`dirname $_filepath`
+    mkdir -p $_filedir
+
+    if echo $_filepath | grep '.iso$' > /dev/null; then
+        _prefix_fname=$(echo $_filename | sed 's/\(^\w\+\).*/\1/')
+        rm $_filedir/${_prefix_fname}*.iso 2>/dev/null
+    elif echo $_filepath | grep '.zip$' > /dev/null; then
+        _postfix_fname=$(echo $_filename | sed 's/FD[0-9]\+\(.*\)/\1/')
+        rm $_filedir/.*${_postfix_fname} 2>/dev/null
+    fi
+    [ "$GZ_DOWNLOAD_AVAILABLE_SPACE" ] &&
+        GZ_DOWNLOAD_AVAILABLE_SPACE=`expr $GZ_DOWNLOAD_AVAILABLE_SPACE - $_content_length`
+    gz_draw_info_add "$_title" "$_filepath" "$_content_length"
+    gz_url_to "$_filepath" "$_url" &
+}
+
+# @param title,version,size
+_write_download_info() {
+    _info_path=$1
+    _title=$2
+    _version=$3
+    _arch=$4
+
+    mkdir -p `dirname $_info_path`
+    cat -<< DOWNLOAD_INFO>$_info_path
+title: $_title
+version: $_version
+arch: $_arch
+DOWNLOAD_INFO
+}
+
+_download_almalinux() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=XFCE
+    _arch=x86_64
+    _site=https://repo.almalinux.org/almalinux
+
+    case $_img_type in
+        liveiso)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9]\+[0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _filename=`gz_url_to_stdout $_site/$_version/live/x86_64/ | sed -n 's.*href="\(\)/\1/p' | sort -u | grep $_flavor`
+            [ "$_filename" ] || return 1
+            _url=$_site/$_version/live/x86_64/$_filename
+            gz_general_download "Download AlmaLinux $_version" "$_url" "$_localdir/$_filename"
+            _title="AlmaLinux $_version"
+            ;;
+        netboot)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9]\+[0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _site=https://repo.almalinux.org/almalinux/$_version/BaseOS/x86_64/os/images/pxeboot
+            for _filename in vmlinuz initrd.img; do
+                _url=$_site/$_filename
+                gz_general_download "Download AlmaLinux netboot $_version $_filename" "$_url" "$_localdir/almalinux/$_filename"
+            done
+            _title="AlmaLinux $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info "$_localdir/almalinux/info" "$_title" "$_version" "$_arch"
+}
+
+_download_alpine() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=x86_64
+    _site=https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/
+
+    case $_img_type in
+        netboot)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="netboot-\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            for _filename in vmlinuz-lts initramfs-lts;do
+                _url=$_site/netbot-$_version/$_filename
+                gz_general_download "Download Alpine netboot $_version $_filename" "$_url" "$_localdir/alpine/$_filename"
+                _title="Alpine $_version"
+            done
+            _title="Alpine $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/alpine/info "$_title" "$_version" "$_arch"
+}
+
+_download_archlinux() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=x86_64
+    _site=https://geo.mirror.pkgbuild.com/iso
+
+    case $_img_type in
+        liveiso)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([1-9]\+[0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || _version=latest
+            _filename=archlinux-${_version}-${_arch}.iso
+            _url=$_site/$_version/$_filename
+            gz_general_download "Download ArchLinux $_version" "$_url" "$_localdir/$_filename"
+            _title="ArchLinux $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/archlinux/info "$_title" "$_version" "$_arch"
+}
+
+_download_debian() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=xfce
+    _arch=amd64
+    _site=https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid
+
+    case $_img_type in
+        liveiso)
+            _url=$_site
+            _filename=`gz_url_to_stdout $_url | sed -n 's/.*href="\(debian.*'$_arch-$_flavor'.iso\)".*/\1/p'`
+            [ "$_filename" ] || return 1
+            _version=`echo $_filename | sed -n 's/debian.*-\([0-9.]\+\).*/\1/p'`
+            _url=$_site/$_filename
+            gz_general_download "Download Debian $_version" "$_url" "$_localdir/$_filename"
+            _title="Debian $_version"
+            ;;
+        netboot)
+            _site=https://ftp.debian.org/debian/dists/stable/main/installer-amd64/current/images/netboot/debian-installer/amd64
+            _version=current
+            for _filename in linux initrd.gz; do
+                _url=$_site/$_filename
+                gz_general_download "Download Debian netboot current $_filename" "$_url" "$_localdir/debian/$_filename"
+            done
+            _title="Debian $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/debian/info "$_title" "$_version" "$_arch"
+}
+
+_download_endeavouros() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=x86_64
+    _site=https://mirrors.gigenet.com/endeavouros/iso
+
+    case $_img_type in
+        liveiso)
+            _filename=`gz_url_to_stdout $_site | sed -n '/href=".*.iso"/p' | sed 's/ \+/ /g' | sort -k3.8 -k3.4M -k3.1,3.2 | sed -n 's/.*href="\(.*.iso\)".*/\1/p' | tail -n1`
+            [ "$_filename" ] || return 1
+            _version=`echo $_filename | sed -n 's/EndeavourOS_\(.*\).iso/\1/p'`
+            _url=$_site/$_filename
+
+            gz_general_download "Download EndeavourOS $_version" "$_url" "$_localdir/$_filename"
+            _title="EndeavourOS $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/endeavouros/info "$_title" "$_version" "$_arch"
+}
+
+_download_fedora() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=x86_64
+    # formal site: https://download.fedoraproject.org/pub/fedora/linux/releases/
+    _site=https://mirrors.ocf.berkeley.edu/fedora/fedora/linux/releases
+
+    _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+    [ "$_version" ] || return 1
+    case $_img_type in
+        liveiso)
+            _site=$_site/$_version/Workstation/$_arch/iso
+            _filename=`gz_url_to_stdout $_site | sed -n 's/.*href="\([^"]\+iso\)" .*/\1/p'`
+            [ "$_filename" ] || return 1
+            _url=$_site/$_filename
+            gz_general_download "Download Fedora $_version" "$_url" "$_localdir/$_filename"
+            _title="Fedora $_version"
+            ;;
+        netboot)
+            for _filename in vmlinuz initrd.img; do
+                _url=$_site/$_version/Server/$_arch/os/images/pxeboot/$_filename
+                gz_general_download "Download Fedora netboot $_version $_filename" "$_url" "$_localdir/fedora/$_filename"
+            done
+            _title="Fedora $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/fedora/info "$_title" "$_version" "$_arch"
+}
+
+_download_kali() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=amd64
+    _site=https://kali.download/base-images/current
+
+    case $_img_type in
+        liveiso)
+            _filename=`gz_url_to_stdout $_site | sed -n 's/.*href="\(kali.*live-amd64.iso\)" .*/\1/p'`
+            [ "$_filename" ] || return 1
+            _version=current
+            _url=$_site/$_filename
+            gz_general_download "Download Kali Live $_version" "$_url" "$_localdir/$_filename"
+            _title="Kali $_version"
+            ;;
+        netboot)
+            _site=https://kali.download/kali/dists/kali-rolling/main/installer-amd64/current/images/netboot/debian-installer/amd64
+            _version=current
+            for _filename in linux initrd.gz; do
+                _url=$_site/$_filename
+                gz_general_download "Download Kali netboot current $_filename" "$_url" "$_localdir/kali/$_filename"
+            done
+            _title="Kali $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/kali/info "$_title" "$_version" "$_arch"
+}
+
+_download_kubuntu() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=x86_64
+    _site=https://cdimage.ubuntu.com/kubuntu/releases
+
+    case $_img_type in
+        liveiso)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _filename=`gz_url_stdout $_site/$_version/release | sed -n 's/.*href="\(kubuntu.*.iso\)".*/\1/p' | sort -u`
+            [ "$_filename" ] || return 1
+            _url=$_site/$_version/release/$_filename
+            gz_general_download "Download Kubuntu $_version" "$_url" "$_localdir/$_filename"
+            _title="Kubuntu $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/kubuntu/info "$_title" "$_version" "$_arch"
+}
+
+_download_linuxmint() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=xfce
+    _arch=x86_64
+    _site=https://mirrors.edge.kernel.org/linuxmint/stable
+
+    case $_img_type in
+        liveiso)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _url=$_site/$_version 
+            _filename=`gz_url_to_stdout $_url | sed -n 's/.*href="\(linuxmint.*.iso\)".*/\1/p' | grep $_flavor`
+            _url=$_site/$_version/$_filename
+            gz_general_download "Download linuxmint $_flavor $_version" "$_url" "$_localdir/$_filename"
+            _title="Linuxmint $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/linuxmint/info "$_title" "$_version" "$_arch"
+}
+
+_download_mageia() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=Plasma
+    _arch=x86_64
+    _site=https://mirrors.kernel.org/mageia/iso
+
+    case $_img_type in
+        liveiso)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _mageia_model="Mageia-${_version}-Live-${_flavor}-${_arch}"
+            _filename=${_mageia_model}.iso
+            _url=$_site/$_version/$_mageia_model/$_filename
+            gz_general_download "Download Mageia $_flavor $_version" "$_url" "$_localdir/$_filename"
+            _title="Mageia $_version $_flavor"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/mageia/info "$_title" "$_version" "$_arch"
+}
+
+_download_manjaro() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=xfce
+    _arch=x86_64
+    _site=https://manjaro.org/download/
+
+    case $_img_type in
+        liveiso)
+            _url=`gz_url_to_stdout $_site | sed -n '/of-full-'$_flavor'/,/div/{s/.*href="\(https.*.iso\)".*/\1/p}'`
+            [ "$_url" ] || return 1
+            _filename=`basename $_url`
+            _version=`echo $_filename | sed -n 's/.*'$_flavor'-\([0-9.]\+\).*/\1/p'`
+            gz_general_download "Download Manjaro $_flavor $_version" "$_url" "$_localdir/$_filename"
+            _title="Manjaro $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/manjaro/info "$_title" "$_version" "$_arch"
+}
+
+_download_mx() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=Xfce
+    _arch=x64
+    _site=https://mirrors.ocf.berkeley.edu/mx-linux/MX/Final/$_flavor
+
+    case $_img_type in
+        liveiso)
+            _filename=`gz_url_to_stdout $_site | sed -n 's/.*href="\(MX.*'$_arch'.iso\)" .*/\1/p' | sort -u | tail -n1`
+            [ "$_filename" ] || return 1
+            _url=$_site/$_filename
+            _version=`echo $_filename | sed -n 's/.*-\([0-9.]\+\).*/\1/p'`
+            gz_general_download "Download MX $_flavor $_version" "$_url" "$_localdir/$_filename"
+            _title="MX $_version $_flavor"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/mx/info "$_title" "$_version" "$_arch"
+}
+
+_download_opensuse() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=GNOME
+    _arch=x86_64
+    _site=https://download.opensuse.org/distribution/openSUSE-current/live
+
+    case $_img_type in
+        liveiso)
+            _url=$_site
+            _filename=`gz_url_to_stdout $_url | sed -n 's/.*\(openSUSE.*'$_flavor'.*x86_64.*\.iso\).*/\1/p' | sort -u | head -n1`
+            [ "$_filename" ] || return 1
+            _version=`echo $_filename | sed -n 's/openSUSE.*-\([0-9.]\+\).*/\1/p'`
+            _url=$_site/$_filename
+            gz_general_download "Download OpenSUSE $_flavor $_version" "$_url" "$_localdir/$_filename"
+            _title="OpenSUSE $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/opensuse/info "$_title" "$_version" "$_arch"
+}
+
+_download_pearl() {
+    _localdir=$1
+    _img_type=$2
+
+    _filename=PearlMATE-Studio-11-11-06-2022.iso
+    _url=https://sourceforge.net/projects/pearl-mate-studio-11/files/PearlMATE-Studio-11-11-06-2022.iso/download
+    _arch=amd64
+    _version="Mate Studio 11"
+    gz_general_download "Download Pearl $_version" "$_url" "$_localdir/$_filename"
+    _title="Pearl $_version"
+    _write_download_info $_localdir/pearl/info "$_title" "$_version" "$_arch"
+}
+
+_download_rocky() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=XFCE
+    _arch=x86_64
+    _site=https://download.rockylinux.org/pub/rocky
+
+    _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+    [ "$_version" ] || return 1
+    case $_img_type in
+        liveiso)
+            _filename=`gz_url_to_stdout $_site/$_version/live/$_arch | sed -n 's/.*href="\(Rocky.*.iso\)".*/\1/p' | grep -i $_flavor | sort -u| tail -n1`
+            [ "$_filename" ] || return 1
+            _url=$_site/$_version/live/$_arch/$_filename
+            gz_general_download "Download Rocky $_version" "$_url" "$_localdir/$_filename"
+            _title="Rocky $_version"
+            ;;
+        netboot)
+            for _filename in vmlinuz initrd.img; do
+                _url=$_site/$_version/BaseOS/x86_64/os/images/pxeboot/$_filename
+                gz_general_download "Download Rocky netboot $_version $_filename" "$_url" "$_localdir/rocky/$_filename"
+            done
+            _title="Rocky $_version"
+            ;;
+        *)
+            ;;
+    esac
+    _write_download_info $_localdir/rocky/info "$_title" "$_version" "$_arch"
+}
+
+_download_steamos() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=desktop
+    _arch=amd64
+    _site=https://github.com/holoiso-staging/releases/releases
+
+    case $_img_type in
+        liveiso)
+            _url=`gz_url_to_stdout $_site | sed -n 's/.*href="\(http.*.iso\)".*/\1/p' | head -n1`
+            [ "$_url" ] || return 1
+            _filename=`basename $_url`
+            _version="3"
+            gz_general_download "Download SteamOS $_version" "$_url" "$_localdir/$_filename"
+            _title="SteamOS $_version"
+            ;;
+        *)
+            ;;
+    esac
+    _write_download_info $_localdir/steamos/info "$_filename" "$_version" "$_arch"
+}
+
+_download_ubuntu() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=desktop
+    _arch=amd64
+    _site=https://cdimage.ubuntu.com/ubuntu/releases
+
+    case $_img_type in
+        liveiso)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _filename=`gz_url_to_stdout $_site/$_version/release | sed -n 's/.*href="\(.*'$_flavor'.*-'$_arch'.iso\)".*/\1/p' | sort -u`
+            [ "$_filename" ] || return 1
+            _url=$_site/$_version/release/$_filename
+            gz_general_download "Download Ubuntu $_flavor $_version" "$_url" "$_localdir/$_filename"
+            _title="Ubuntu Server $_version"
+            ;;
+        netboot)
+            _site=https://mirrors.ocf.berkeley.edu/ubuntu-releases/
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            for _filename in linux initrd; do
+                _url=$_site/$_version/netboot/amd64/$_filename
+                gz_general_download "Download Ubuntu netboot $_version" "$_url" "$_localdir/ubuntu/$_filename"
+            done
+            _title="Ubuntu Server $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/ubuntu/info "$_title" "$_version" "$_arch"
+}
+
+_download_openbsd() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=amd64
+    _site=https://cdn.openbsd.org/pub/OpenBSD
+
+    case $_img_type in
+        netboot)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _filename=bsd.rd
+            _url=$_site/$_version/amd64/$_filename
+            gz_general_download "Download OpenBSD netboot $_version" "$_url" "$_localdir/openbsd/$_filename"
+            _title="OpenBSD $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/openbsd/info "$_title" "$_version" "$_arch"
+}
+
+_download_netbsd() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=amd64
+    _site=https://ftp.netbsd.org/pub/NetBSD
+
+    case $_img_type in
+        netboot)
+            _version=`gz_url_to_stdout $_site/README | sed -n 's/.*currently at release version \([0-9.]\+\).*/\1/p'`
+            [ "$_version" ] || return 1
+            _filename=netbsd-INSTALL.gz
+            _url=$_site/NetBSD-$_version/amd64/binary/kernel/$_filename
+            gz_general_download "Download NetBSD netboot $_version" "$_url" "$_localdir/netbsd/$_filename"
+            _title="NetBSD $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/netbsd/info "$_title" "$_version" "$_arch"
+}
+
+_download_freebsd() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=amd64
+    _site=https://download.freebsd.org/releases/amd64/amd64/ISO-IMAGES
+
+    case $_img_type in
+        liveiso)
+            _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*".*/\1/p' | sort -uV | tail -n1`
+            [ "$_version" ] || return 1
+            _filename=FreeBSD-$_version-RELEASE-amd64-bootonly.iso
+            _url=$_site/$_filename
+            gz_general_download "Download FreeBSD $_version" "$_url" "$_localdir/$_filename"
+            _title="FreeBSD $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info $_localdir/freebsd/info "$_title" "$_version" "$_arch"
+}
+
+_download_omnios() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=x86_64
+    _site=https://downloads.omnios.org/media/stable
+
+    case $_img_type in
+        liveiso)
+            _filename=`gz_url_to_stdout $_site | sed -n 's/.*href="\(.*.iso\)".*/\1/p' | head -n1`
+            [ "$_filename" ] || return 1
+            _url=$_site/$_filename
+            _version=`echo $_filename | sed 's/omnios-\(.*\).iso/\1/'`
+            gz_general_download "Download OmniOS CE $_version" "$_url" "$_localdir/$_filename"
+            _title="OmniOS CE $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _write_download_info $_localdir/omnios/info "$_title" "$_version" "$_arch"
+}
+
+_download_freedos() {
+    _localdir=$1
+    _img_type=$2
+
+    _flavor=
+    _arch=i386
+    _site=https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions
+
+    _download_root=$(dirname `dirname $_localdir`)
+    _memdisk=$_download_root/boot/syslinux/4.07/bin/memdisk
+    [ -f "$_memdisk" ] || gz_download_memdisk $_download_root
+    if [ ! -f "$_memdisk" ]; then
+        gz_log_err "Download syslinux memdisk failed"
+        return 1
+    fi
+
+    _version=`gz_url_to_stdout $_site | sed -n 's/.*href="\([0-9.]\+\).*".*/\1/p' | sort -uV | tail -n1`
+    [ "$_version" ] || return 1
+
+    case $_img_type in
+        fullusb)
+            _filename=`gz_url_to_stdout $_site/$_version/official | sed -n 's/.*href="\(.*FullUSB.zip\)".*/\1/p'`
+            [ "$_filename" ] || _filename="FD`echo $_version | sed 's/\.//'`-FullUSB.zip"
+            _url=$_site/$_version/official/$_filename
+            gz_general_download "Download FreeDOS Full $_version" "$_url" "`dirname $_localdir`/$_filename"
+            _title="FreeDOS FULL $_version"
+            ;;
+        liteusb)
+            _filename=`gz_url_to_stdout $_site/$_version/official | sed -n 's/.*href="\(.*LiteUSB.zip\)".*/\1/p'`
+            [ "$_filename" ] || _filename="FD`echo $_version | sed 's/\.//'`-LiteUSB.zip"
+            _url=$_site/$_version/official/$_filename
+            gz_general_download "Download FreeDOS Lite $_version" "$_url" "`dirname $_localdir`/$_filename"
+            _title="FreeDOS LITE $_version"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _write_download_info `dirname $_localdir`/freedos/info "$_title" "$_version" "$_arch"
+}
+
+gz_distros_parse() {
+    _distros_info=$*
+
+    gz_log_debug "$FUNCNAME: $_distros_info passed in"
+    for _distro_info in $_distros_info; do
+        _distro=`echo $_distro_info | awk -F : '{print $1}'`
+        _supported=`echo "$GZ_DOWNLOAD_DISTROS_ALL" | sed -n '/\b'$_distro'\b/p'`
+        if [ ! "$_supported" ]; then
+            gz_msg "$_distro not supported in current implementation"
+            gz_log_err "$FUNCNAME: $_distro not supported in current implementation"
+            return 1
+        fi
+
+        _req_type=`echo $_distro_info | awk -F : '{print $2}' | sed 's/,/ /'`
+        for _imgtype in $_req_type; do
+            _distro_type=$(eval echo \$${_distro}_type)
+            _supported=`echo $_distro_type | sed -n '/\b'$_imgtype'\b/p'`
+            if [ ! "$_supported" ]; then
+                gz_msg "$_imgtype not supported in $_distro"
+                gz_log_err "$FUNCNAME: $_imgtype not supported in $_distro"
+                return 1
+            fi
+        done
+    done
+
+    return 0
+}
+
+# @param gzroot,distros-info
+gz_download_distros() {
+    _gzroot=$1
+    shift
+    _distros_info=$*
+
+    _mnt_dir=$_gzroot
+    GZ_DOWNLOAD_AVAILABLE_SPACE=
+    while [ $_mnt_dir != "/" ]; do
+        _mnt_dir=`dirname $_mnt_dir`
+        GZ_DOWNLOAD_AVAILABLE_SPACE=`df | awk '{if ($NF ~ m){printf("%d", $4 * 1024)}}' m=$_mnt_dir`
+        [ "$GZ_DOWNLOAD_AVAILABLE_SPACE" ] && break
+    done
+
+    _distros_info=`echo $_distros_info | sed 's/+/ /g'`
+    gz_log_debug "$FUNCNAME: $_distros_info passed in"
+    gz_distros_parse $_distros_info
+
+    for _distro_info in $_distros_info; do
+        _img_types=`echo $_distro_info | awk -F : '{print $2}' | sed 's/,/ /'`
+        _distro=`echo $_distro_info | awk -F : '{print $1}'`
+        [ "$_img_types" ] || _img_types=$(eval echo \$${_distro}_type | sed 's/,/ /')
+
+        if [ "$_distro" = "openbsd" -o "$_distro" = "netbsd" -o "$_distro" = "freebsd" ]; then
+            _distro_localdir=$_gzroot/bsd
+        elif [ "$_distro" = "freedos" ]; then
+            _distro_localdir=$_gzroot/dos
+        elif [ "$_distro" = "omnios" -o "$_distro" = "openindiana" ]; then
+            _distro_localdir=$_gzroot/sysv
+        else
+            _distro_localdir=$_gzroot/linux
+        fi
+
+        for _img_type in $_img_types; do
+            _localdir=$_distro_localdir/$_img_type
+            eval _download_$_distro $_localdir $_img_type
+        done
+    done
+}
+
+gz_cleanup_download() {
+    gz_cleanup_draw_file_progress
+}
+
+:<< UNIT_TEST
+# @param gzroot distro[:img-type] [distro:img-type] ...
+main() {
+    source gz_logger
+    source gz_draw_file_progress
+    trap "gz_cleanup_download" INT
+    gz_set_log_level $LOG_DEBUG
+    draw_title="GYOZA download status"
+
+    gzroot=$1; shift
+    [ "$gzroot" ] || exit 1
+    [ "$*" ] || exit 1
+
+    gz_download_distros $gzroot $*
+    draw_info=`gz_draw_info_get 2>/dev/null`
+    gz_draw_all_files_progress "$draw_title" "$draw_info"
+    gz_cleanup_download
+}
+
+main $*
+UNIT_TEST
