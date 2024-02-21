@@ -1,0 +1,203 @@
+.\" 
+.\" Author: Cyril Huang 2024
+.\"
+
+.TH gyoza 8 "multiboot creator" 2-18-2024
+.SH NAME
+
+gyoza \- A utility for creating USB booting device with multiple
+Live/Installation OS
+.SH SYNOPSIS
+
+gyoza command [argv] [options]
+.SH DESCRIPTION
+.PP
+gyoza creates a USB booting device or device image file with management of
+GRUB menu system for booting a Live ISO or netboot/pxeboot installation images.
+.PP
+It supports pre-defined supported Linux distros downloaded from latest release
+of ISO/netboot images what vendors provided. The other popular 386 BSD,
+SysemV distriubtions and FreeDOS are supported if they provide live ISO or
+netboot ability images.
+.PP
+gyoza could also import ESXi/Microsfot Wiindows 7~11 standard ISO into USB
+device and the GRUB menu system.
+.SH COMMAND SUMMARY
+.SS create
+create a USB device or image file for gyoza system
+.SS download
+download pre-defined supported OS and image type
+.SS extract
+extract required booting files from ISO downloaded
+.SS add
+add pre-defined supported OS and image type to device
+.SS remove
+remove pre-defined supported OS and image type to device
+.SS update
+update pre-defined supported OS and image type to device
+.SS remenu
+remenu GRUB menu system if something wrong
+.SS theme
+manage GRUB theme in the device
+.SS import
+import Other DOS image, ESXi ISO or Mirosoft Windows 7~11
+.SS deport
+remove DOS image, ESXi ISO or Mirosoft Windows 7~11 from device
+.SS supported
+list supported distributions and image type
+.SS info
+information about the device including the deport ID required in deport command
+.SS test
+test the device/image file created using qemu
+.P
+for more details info of each command
+.HP
+gyoza help $command
+
+or
+.HP
+gyoza $command help
+.SH OS/DISTRIBUTION SUPPORTED
+2 types of Linux, BSD and SystemV images can be download.
+.IP liveiso
+usually provide a GUI for assessment of look and feel of X system
+and installer also provided. Good for desktop user.
+.IP netboot
+usually just need kernel and initramfs 2 little small files to quick install
+a system with server, security, rescue and so forth essential functionality.
+.PP
+Actually those are limited by distribution if they provide such images. On
+the other hand, due to the FAT32 limitation, live ISO in some distribution
+over 4G size will not be considered into supported list.
+.SS Linux
+.HP
+almalinux
+
+netboot
+.HP
+archlinux
+
+liveiso
+.HP
+debian
+
+liveiso,netboot
+.HP
+endeavouros
+
+liveiso
+.HP
+fedora
+
+liveiso,netboot
+.HP
+kali
+
+netboot
+.HP
+kubuntu
+
+liveiso
+.HP
+linuxmint
+
+liveiso
+.HP
+mageia
+
+liveiso
+.HP
+manjaro
+
+liveiso
+.HP
+mx
+
+liveiso
+.HP
+opensuse
+
+liveiso
+.HP
+pearl
+
+liveiso
+.HP
+rocky
+
+netboot
+.HP
+steamos
+
+liveiso
+.HP
+ubuntu
+
+netboot
+.SS SysV
+.HP
+omnios ce
+
+liveiso(only for installation)
+.SS BSD
+.HP
+netbsd
+
+netboot
+.HP
+openbsd
+
+netboot
+.SS DOS
+.HP
+freedos
+
+fullusb,liteusb
+.SH OPTIONS
+.SS global options
+-l, --log     log level used when running program
+.HP
+-L, --logfile logfile for logging
+.HP
+-f, --force   force the operation such as remenu, adding theme.
+.HP
+-s, --size    size of image file when creating a image device file,
+.HP
+-h, --help    help
+.SS theme options
+-A, --add     add theme to device
+.HP
+-D, --delete  delete theme from device
+.HP
+-S, --select  select theme in device to be used
+.SS test options
+-u, --uefi    test with qemu UEFI
+.SS import options
+-p, --passtpm pass TPM CPU check in Microsoft Windows 11 booting
+.SS remenu options
+-t, --theme   make theme selection when creating GRUB menu 
+.HP
+--fs-label    make FAT32 label not default GYOZA
+.SH EXAMPLES & PRACTICES
+.TP
+gyoza create testing.img debian
+.TP
+gyoza create /dev/sdc archlinux
+.TP
+gyoza add testing.img manjaro debian:netboot 
+.TP
+gyoza import /dev/sdc Win11_23H2_English_x64v2.iso
+.TP
+gyoza import /dev/sdc 
+.TP
+gyoza theme /dev/sdc default --add --select
+.TP
+gyoza info /dev/sdc
+.TP
+gyoza test /dev/sdc
+.SH LIMITATIONS
+Distributions and type supported actually are from the limitation what vendors
+can provide. However, the filesystem is simple clean FAT32 so a live ISO over
+4G is not supported either.
+.SH COPYRIGHT
+GNU GPLv3

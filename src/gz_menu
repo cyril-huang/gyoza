@@ -1,0 +1,1012 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+GZ_GRUB_ROOT=/boot/grub
+GZ_GRUB_CFG=grub.cfg
+GZ_GRUB_CFGD=grub.cfg.d
+GZ_FS_LABEL=GYOZA
+
+GZ_MENU_LINUX_TITLE="Installation/Live of Linux x86_64"
+GZ_MENU_LINUX_LIVEISO_TITLE="Live ISO of Linux"
+GZ_MENU_LINUX_LIVEDSK_TITLE="Live ISO of Linux on USB Drive"
+GZ_MENU_LINUX_NETBOOT_TITLE="Network installation of Linux"
+GZ_MENU_SYSV_TITLE="Installation/Live of SystemV x86_64"
+GZ_MENU_SYSV_LIVEISO_TITLE="Live ISO of SystemV"
+GZ_MENU_SYSV_NETBOOT_TITLE="Network installation of SystemV"
+GZ_MENU_BSD_TITLE="Installation/Live of BSD x86_64"
+GZ_MENU_BSD_LIVEISO_TITLE="Live ISO of BSD"
+GZ_MENU_BSD_NETBOOT_TITLE="Network installation of BSD"
+GZ_MENU_DOS_TITLE="DOS Live/Installation"
+
+# @param grubroot,fs-label,theme
+gz_rootmenu() {
+    _grubroot="`echo $1 | sed 's|/\+|/|'`"
+    if [ -z "$_grubroot" -o "$_grubroot" = "/" ]; then
+        gz_log_err_exit "ERROR: No GRUBROOT Will destroy system grub.cfg, EXIT"
+    fi
+    _fs_label="${2-$GZ_FS_LABEL}"
+    _theme=$3
+    cat -<<ROOTMENU > $_grubroot/$GZ_GRUB_CFG
+# GYOZA Multiple OS USB creator, For MS-Windows import, DON'T REMOVE THIS LINE
+set default=0
+set timeout=15
+set theme=$_theme
+set label=$_fs_label
+export theme
+export label
+search.fs_label \$label --set root
+probe -u \$root --set=uuid
+
+# use text mode for efi
+if [ \$grub_platform = "efi" ]; then
+    insmod efi_gop
+    insmod efi_uga
+    insmod video
+    set color_normal=white/light-blue
+else
+    set gfxmode=1280x720
+    insmod vbe
+    insmod vga
+    insmod gfxterm
+    insmod video
+    insmod video_bochs
+    insmod video_cirrus
+    insmod jpeg
+    insmod png
+    if [ -f "\$theme" ]; then
+        terminal_output gfxterm
+    else
+        set color_normal=white/light-blue
+    fi
+fi
+
+if [ -f $GZ_GRUB_ROOT/$GZ_GRUB_CFGD/root.cfg ]; then
+    source $GZ_GRUB_ROOT/$GZ_GRUB_CFGD/root.cfg
+fi
+
+menuentry '' --id empty {
+}
+
+menuentry 'Boot localdisk 0' --class localdisk --id localdisk {
+if [ -d (hd0,msdos1) ]; then
+    chainloader (hd0)+1
+else
+    chainloader (hd0)/efi/boot/bootx64.efi
+fi
+}
+ROOTMENU
+}
+
+# @param grubroot,node,title,class
+gz_submenu() {
+    _sm_menu_action=$1
+    _sm_grubroot="$2"
+    _sm_node="$3"
+    _sm_title="$4"
+    _sm_class="$5"
+    _sm_classes=
+
+    _sm_menu_id=`echo $_sm_node | sed 's|^/||' | sed 's|/|-|g'`
+    _sm_parent=`dirname $_sm_node`
+    _sm_parent_dir=`echo $_sm_parent | sed 's|^/||'`
+    [ "$_sm_parent_dir" ] && mkdir -p $_sm_grubroot/$GZ_GRUB_CFGD/`dirname $_sm_parent_dir`
+    [ "$_sm_parent" = "/" ] && _sm_parent=root
+
+    gz_log_debug "$FUNCNAME: action -> $_sm_menu_action, node -> $_sm_node, parent -> $_sm_parent"
+
+    if [ "$_sm_menu_action" = "remove" ]; then
+        if [ -f "$_sm_grubroot/$GZ_GRUB_CFGD/$_sm_parent.cfg" ]; then
+            sed -i '/^submenu.*--id '$_sm_menu_id'/,/}/d' $_sm_grubroot/$GZ_GRUB_CFGD/$_sm_parent.cfg
+            _sm_cfgsize=`stat -c "%s" $_sm_grubroot/$GZ_GRUB_CFGD/$_sm_parent.cfg`
+            if [ "$_sm_cfgsize" = "0" ]; then
+                rm $_sm_grubroot/$GZ_GRUB_CFGD/$_sm_parent.cfg
+                [ "$_sm_parent" = "root" ] || gz_submenu remove $_sm_grubroot $_sm_parent
+            fi
+        else
+            gz_log_debug "$FUNCNAME: remove without parent $_sm_parent.cfg"
+        fi
+    fi
+
+    for __c in $_sm_class; do _sm_classes="$_sm_classes --class $__c"; done
+    [ "$_sm_classes" ] || _sm_classes="--class `basename $_sm_node`"
+    [ -d $_sm_grubroot/$GZ_GRUB_CFGD ] || mkdir -p $_sm_grubroot/$GZ_GRUB_CFGD
+    _sm_node=`echo $_sm_node | sed 's|^/||'`
+    _submenu="$(cat -<<SUBMENU
+submenu '$_sm_title' $_sm_classes --id $_sm_menu_id {
+    if [ -f $GZ_GRUB_ROOT/$GZ_GRUB_CFGD/$_sm_node.cfg ]; then
+        source $GZ_GRUB_ROOT/$GZ_GRUB_CFGD/$_sm_node.cfg
+    fi
+}
+SUBMENU
+)"
+    if [ "$_sm_menu_action" = "update" ]; then
+        if [ -f "$_sm_grubroot/$GZ_GRUB_CFGD/$_sm_parent.cfg" ]; then
+            sed -i '/^submenu.*--id '$_sm_menu_id'/{:b;$!N;/}/!bb;s/.*/'$_submenu'/}' \
+                $_sm_grubroot/$GZ_GRUB_CFGD/$_sm_parent.cfg
+        fi
+    else
+        echo "$_submenu" >> $_sm_grubroot/$GZ_GRUB_CFGD/${_sm_parent}.cfg
+    fi
+}
+
+# @param grubroot,node,title,class,menu_code
+gz_menu() {
+    _m_menu_action=$1
+    _m_grubroot="$2"
+    _m_node="$3"
+    _m_title="$4"
+    _m_class="$5"
+    _m_menu_code="$6"
+    _m_classes=
+
+    _m_menu_id=`echo $_m_node | sed 's|/\+|/|' | sed 's|^/||' | sed 's|/|-|g'`
+    _m_parent=`dirname $_m_node`
+    _m_parent_dir=`echo $_m_parent | sed 's|^/||'`
+    [ "$_m_parent_dir" ] && mkdir -p $_m_grubroot/$GZ_GRUB_CFGD/`dirname $_m_parent_dir`
+    [ "$_m_parent" = "/" ] && _m_parent=root
+
+    gz_log_debug "$FUNCNAME: action -> $_m_menu_action, node -> $_m_node, parent -> $_m_parent"
+
+    if [ "$_m_menu_action" = "remove" ]; then
+        if [ -f "$_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg" ]; then
+            sed -i '/^menuentry.*--id '$_m_menu_id'/,/}/d' $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg
+            _m_cfgsize=`stat -c "%s" $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg`
+            if [ "$_m_cfgsize" = "0" ]; then
+                rm $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg
+                [ "$_m_parent" = "root" ] || gz_submenu remove $_m_grubroot $_m_parent
+            fi
+        else
+            gz_log_debug "$FUNCNAME: remove without parent $_m_parent.cfg"
+        fi
+        return 0
+    fi
+
+    for __c in $_m_class; do _m_classes="$_m_classes --class $__c"; done
+    [ "$_m_classes" ] || _m_classes="--class `basename $_m_node`"
+    [ -d $_m_grubroot/$GZ_GRUB_CFGD ] || mkdir -p $_m_grubroot/$GZ_GRUB_CFGD
+    _m_menu_code=`echo "$_m_menu_code" | sed '/^ *$/d'`
+
+    _menuentry="$(cat -<<MENU
+menuentry '$_m_title' $_m_classes --id $_m_menu_id {
+$_m_menu_code
+}
+MENU
+)"
+    __menuentry=$(echo "$_menuentry" | tr '\n' '%' | sed 's/}%$/}/')
+    if [ "$_m_menu_action" = "update" ]; then
+        if [ -f "$_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg" ]; then
+            sed -i '/^menuentry.*--id '$_m_menu_id'/{:b;$!N;/}/!bb;s|.*|'"$__menuentry"'|}' \
+                $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg
+            sed -i 's/%/\n/g' $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg
+        fi
+    else
+        if [ -f "$_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg" ]; then
+            if grep $_m_menu_id $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg > /dev/null; then
+                sed -i '/^menuentry.*--id '$_m_menu_id'/,/}/d' $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg
+            fi
+        fi
+        echo "$_menuentry" >> $_m_grubroot/$GZ_GRUB_CFGD/$_m_parent.cfg
+    fi
+}
+
+_submenu_linux() {
+    _grubroot=$1
+    _node=$2
+    _parent_node=`dirname $_node`
+    _node_type=`basename $_parent_node`
+
+    grep 'id linux' $_grubroot/$GZ_GRUB_CFGD/root.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /linux "$GZ_MENU_LINUX_TITLE"
+
+    if [ "$_node_type" = "liveiso" ]; then
+        grep 'id linux-liveiso' $_grubroot/$GZ_GRUB_CFGD/linux.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /linux/liveiso "$GZ_MENU_LINUX_LIVEISO_TITLE"
+    elif [ "$_node_type" = "livedsk" ]; then
+        grep 'id linux-livedsk' $_grubroot/$GZ_GRUB_CFGD/linux.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /linux/livedsk "$GZ_MENU_LINUX_LIVEDSK_TITLE"
+    else
+        grep 'id linux-netboot' $_grubroot/$GZ_GRUB_CFGD/linux.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /linux/netboot "$GZ_MENU_LINUX_NETBOOT_TITLE"
+    fi
+}
+
+_submenu_bsd() {
+    _grubroot=$1
+    _node=$2
+    _parent_node=`dirname $_node`
+    _node_type=`basename $_parent_node`
+
+    grep 'id bsd' $_grubroot/$GZ_GRUB_CFGD/root.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /bsd "$GZ_MENU_BSD_TITLE"
+
+    if [ "$_node_type" = "liveiso" ]; then
+        grep 'id bsd-liveiso' $_grubroot/$GZ_GRUB_CFGD/bsd.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /bsd/liveiso "$GZ_MENU_BSD_LIVEISO_TITLE"
+    else
+        grep 'id bsd-netboot' $_grubroot/$GZ_GRUB_CFGD/bsd.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /bsd/netboot "$GZ_MENU_BSD_NETBOOT_TITLE"
+    fi
+}
+
+_submenu_sysv() {
+    _grubroot=$1
+    _node=$2
+    _parent_node=`dirname $_node`
+    _node_type=`basename $_parent_node`
+
+    grep 'id sysv' $_grubroot/$GZ_GRUB_CFGD/root.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /sysv "$GZ_MENU_SYSV_TITLE"
+
+    if [ "$_node_type" = "liveiso" ]; then
+        grep 'id sysv-liveiso' $_grubroot/$GZ_GRUB_CFGD/sysv.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /sysv/liveiso "$GZ_MENU_SYSV_LIVEISO_TITLE"
+    else
+        grep 'id sysv-netboot' $_grubroot/$GZ_GRUB_CFGD/sysv.cfg >/dev/null 2>&1 ||
+            gz_submenu add $_grubroot /sysv/netboot "$GZ_MENU_SYSV_NETBOOT_TITLE"
+    fi
+}
+
+_submenu_dos() {
+    _grubroot=$1
+    _node=$2
+
+    grep 'id dos' $_grubroot/$GZ_GRUB_CFGD/root.cfg >/dev/null 2>&1 ||
+        gz_submenu add $_grubroot /dos "$GZ_MENU_DOS_TITLE"
+}
+
+# @param gzroot,node,kernel,initramfs,kernel-opt,title,class
+_menu_linux() {
+    _menu_action=$1
+    _gzroot=$2
+    _node=$3
+    _kernel=$4
+    _initramfs=$5
+    _kernel_opt=$6
+    _title=$7
+    _class=$8
+
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+
+    if [ "`echo $_node | awk -F / '{print $3}'`" = "livedsk" ]; then
+        _gz_kernel_path=`echo $_gzroot/$_kernel | sed 's|/\+/|/|'`
+        _kernel_path=$_kernel
+        _initrd_path=$_initramfs
+    else
+        _gz_kernel_path=`echo $_gzroot/$_node/$_kernel | sed 's|/\+|/|'`
+        _kernel_path=$_node/$_kernel
+        _initrd_path=
+        for _initrd in $_initramfs; do _initrd_path="$_node/$_initrd $_initrd_path"; done
+    fi
+    if [ $_menu_action = "add" ]; then
+        [ -f $_gz_kernel_path ] || return 1
+    fi
+
+    [ "$_class" ] || _class=`basename $_node`
+    _menu_code="
+    linux $_kernel_path $_kernel_opt
+    initrd $_initrd_path
+    "
+
+    gz_menu "$_menu_action" "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+    [ "$_menu_action" != "remove" ] && _submenu_linux $_grubroot $_node
+}
+
+_menu_alpine() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/alpine
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        netboot)
+            [ "$_title" ] || _title="Alpine $_version"
+            _kernel="vmlinuz-lts"
+            _initramfs="initramfs-lts"
+            _kernel_opt=""
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_almalinux() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/almalinux
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        netboot)
+            [ "$_title" ] || _title="AlmaLinux $_version"
+            _kernel="vmlinuz"
+            _initramfs="initrd.img"
+            _kernel_opt="inst.repo=https://repo.almalinux.org/almalinux/$_version/BaseOS/$_arch/os/ ip=dhcp"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_archlinux() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/archlinux
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz-linux"
+            _initramfs="intel-ucode.img amd-ucode.img initramfs-linux.img"
+            _kernel_opt="archisobasedir=arch img_dev=/dev/disk/by-label/$_fs_label img_loop=/linux/$_imgtype/$_isoname earlymodules=loop"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_debian() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/debian
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz"
+            _initramfs="initrd.img"
+            _kernel_opt="boot=live findiso=/linux/$_imgtype/$_isoname"
+            ;;
+        netboot)
+            [ "$_title" ] || _title="Debian Current"
+            _kernel="linux"
+            _initramfs="initrd.gz"
+            _kernel_opt=""
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_endeavouros() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/endeavouros
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz-linux"
+            _initramfs="intel-ucode.img amd-ucode.img initramfs-linux.img"
+            _kernel_opt="img_dev=/dev/disk/by-label/$_fs_label img_loop=/linux/$_imgtype/$_isoname earlymodules=loop"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_fedora() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/fedora
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz"
+            _initramfs="initrd.img"
+            _kernel_opt="iso-scan/filename=/linux/$_imgtype/$isoname root=live:/dev/loop0 ro rd.live.image"
+            ;;
+        netboot)
+            [ "$_title" ] || _title="Fedora $_version"
+            _kernel="vmlinuz"
+            _initramfs="initrd.img"
+            _kernel_opt="inst.repo=https://mirrors.ocf.berkeley.edu/fedora/fedora/linux/releases/$_version/Everything/$_arch/os/ ip=dhcp"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_kali() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/kali
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _node=/linux/livedsk/kali
+            [ "$_title" ] || _title="Kali $_version"
+
+            _kernel="/live/vmlinuz"
+            _initramfs="/live/initrd.img"
+            _kernel_opt="boot=live components quiet splash noeject"
+            ;;
+        netboot)
+            [ "$_title" ] || _title="Kali $_version"
+            _kernel="linux"
+            _initramfs="initrd.gz"
+            _kernel_opt=""
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_kubuntu() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/kubuntu
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz"
+            _initramfs="initrd"
+            _kernel_opt="iso-scan/filename=/linux/$_imgtype/$isoname --- quiet splash"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_linuxmint() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/linuxmint
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz"
+            _initramfs="initrd.lz"
+            _kernel_opt="file=/cdrom/preseed/linuxmint.seed boot=casper iso-scan/filename=/linux/$_imgtype/$_isoname quiet splash --"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_mageia() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/mageia
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _node=/linux/livedsk/mageia
+            [ "$_title" ] || _title="Mageia $_version"
+
+            _kernel="/loopbacks/vmlinuz"
+            _initramfs="/loopbacks/initrd.img"
+            _kernel_opt="root=mgalive:LABEL=$_fs_label noiswmd audit=0 rd.luks=0 rd.lvm=0 rd.md=0 rd.dm=0 vga=788 splash quiet noxconf xdriver=free"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_manjaro() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/manjaro
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isofile=$(find $_gzroot -name "*.iso" | grep -i $(basename $_node))
+            _isoname=`basename $_isofile 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz-x86_64"
+            _initramfs="amd_ucode.img intel_ucode.img initramfs-x86_64.img"
+            [ "$_isofile" ] && _cdlabel="`file $_isofile | awk -F "'" '{print $2}'`"
+            _kernel_opt="driver=nonfree nouveau.modeset=0 i915.modeset=1 radeon.modeset=1 img_dev=/dev/disk/by-uuid/\${rootuuid} img_loop=/linux/$_imgtype/$_isoname misobasedir=manjaro misolabel=$_cdlabel quiet systemd.show_status=1"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_mx() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/mx
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz"
+            _initramfs="initrd.gz"
+            _kernel_opt="from=hd,usb fromiso=/linux/$_imgtype/$_isoname"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_opensuse() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/opensuse
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isofile=$(find $_gzroot -name "*.iso" | grep -i $(basename $_node))
+            _isoname=`basename $_isofile 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="linux"
+            _initramfs="initrd"
+            [ "$_isofile" ] && _cdlabel="`file $_isofile | awk -F "'" '{print $2}'`"
+            _kernel_opt="root=live:CDLABEL=$_cdlabel $ rd.live.image verbose iso-scan/filename=/linux/$_imgtype/$isoname rd.live.overlay.persistent rd.live.overlay.cowfs=ext4 splash=silent quiet systemd.show_status=yes"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_pearl() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/pearl
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i $(basename $_node)) 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz"
+            _initramfs="initrd.gz"
+            _kernel_opt="file=/cdrom/preseed/custom.seed boot=casper iso-scan/filename=/linux/$_imgtype/$_isoname quiet splash --"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_rocky() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/rocky
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        netboot)
+            [ "$_title" ] || _title="Rocky $_version"
+            _kernel="vmlinuz"
+            _initramfs="initrd.img"
+            _kernel_opt="inst.repo=https://download.rockylinux.org/pub/rocky/$_version/BaseOS/$_arch/os/ ip=dhcp"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_steamos() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/linux/$_imgtype/steamos
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i "holo") 2>/dev/null`
+            [ "$_title" ] || _title=$_isoname
+
+            _kernel="vmlinuz-linux-zen"
+            _initramfs="intel-ucode.img amd-ucode.img initramfs-linux-zen.img"
+            _kernel_opt="splash plymouth.nolog archisobasedir=arch img_dev=/dev/disk/by-label/$_fs_label img_loop=/linux/$_imgtype/$_isoname earlymodules=loop"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_ubuntu() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+
+    _node=/linux/$_imgtype/ubuntu
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        netboot)
+            [ "$_title" ] || _title="Ubuntu Server $_version"
+            _kernel="linux"
+            _initramfs="initrd"
+            _kernel_opt="iso-url=https://releases.ubuntu.com/$_version/ubuntu-$_version-live-server-amd64.iso ip=dhcp ---"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    _menu_linux "$_menu_action" "$_gzroot" "$_node" "$_kernel" "$_initramfs" "$_kernel_opt" "$_title"
+}
+
+_menu_netbsd() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/bsd/$_imgtype/netbsd
+    if [ "$_menu_action" = "add" ]; then
+        [ -f "$_gzroot/$_node/netbsd-INSTALL.gz" ] || return 1
+    fi
+
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    [ "$_title" ] || _title="NetBSD"
+    _class=netbsd
+    _menu_code="
+    if [ \$grub_cpu = 'i386' -a \$grub_platform = 'pc' ]; then
+        knetbsd $_node/netbsd-INSTALL.gz
+    fi
+    "
+
+    gz_menu "$_menu_action" "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+    [ "$_menu_action" != "remove" ] && _submenu_bsd $_grubroot $_node
+}
+
+_menu_openbsd() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/bsd/$_imgtype/openbsd
+    if [ "$_menu_action" = "add" ]; then
+        [ -f "$_gzroot/$_node/bsd.rd" ] || return 1
+    fi
+
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    [ "$_title" ] || _title="OpenBSD"
+    _class=openbsd
+    _menu_code="
+    if [ \$grub_cpu = 'i386' -a \$grub_platform = 'pc' ]; then
+        kopenbsd $_node/bsd.rd
+    fi
+    "
+
+    gz_menu "$_menu_action" "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+    [ "$_menu_action" != "remove" ] && _submenu_bsd $_grubroot $_node
+}
+
+_menu_freebsd() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/bsd/$_imgtype/freebsd
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _version="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/version/{print $2}'`)"
+    _arch="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/arch/{print $2}'`)"
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i "holo") 2>/dev/null` || return 1
+            [ "$_title" ] || _title=$_isoname
+
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+    _class=freebsd
+    _menu_code="
+    if [ -d (loop) ]; then loopback -d loop; fi
+    set isofile=/bsd/$_isoname
+    loopback loop \$_isofile
+    kfreebsd (loop)/boot/kernel/kernel -v
+    kfreebsd_module \$isofile type=mfs_root
+    set kFreeBSD.vfs.root.mountfrom=cd9660:/dev/md0
+    "
+
+    gz_menu "$_menu_action" "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+    [ "$_menu_action" != "remove" ] && _submenu_bsd $_grubroot $_node
+}
+
+_menu_omnios() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    _node=/sysv/$_imgtype/omnios
+
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+    _title="$(echo -n `cat $_gzroot/$_node/info 2>/dev/null | awk -F : '/title/{print $2}'`)"
+    _class=omnios
+    case $_imgtype in
+        liveiso)
+            _isoname=`basename $(find $_gzroot -name "*.iso" | grep -i "omnios") 2>/dev/null`
+            if [ "$_menu_action" = "add" ]; then
+                [ "$_isoname" ] || return 1
+            fi
+            [ "$_title" ] || _title=$_isoname
+            _menu_code="
+    if [ \$grub_cpu = 'i386' -a \$grub_platform = 'pc' ]; then
+        if [ -d (loop) ]; then loopback -d loop; fi
+        loopback loop `dirname $_node`/$_isoname
+        multiboot (loop)/platform/i86pc/kernel/amd64/unix /platform/i86pc/kernel/amd64/unix
+        module (loop)/platform/i86pc/amd64/boot_archive.gz /platform/i86pc/amd64/boot_archive.gz
+    fi
+    "
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    gz_menu "$_menu_action" "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+    [ "$_menu_action" != "remove" ] && _submenu_sysv $_grubroot $_node
+}
+
+_menu_freedos() {
+    _menu_action=$1
+    _gzroot="$2"
+    _imgtype="$3"
+    _fs_label="${4-$GZ_FS_LABEL}"
+
+    if [ "$_menu_action" = "add" ]; then
+        ls $_gzroot/dos/FD*.img > /dev/null 2>&1 || return 1
+        [ -f "$_gzroot/boot/syslinux/4.07/bin/memdisk" ] || return 1
+    fi
+
+    _grubroot=`echo $_gzroot/$GZ_GRUB_ROOT | sed 's|/\+|/|'`
+
+    case $_imgtype in
+        fullusb)
+            _version="`ls $_gzroot/dos/FD*.img 2>/dev/null | sed -n 's/.*FD\([0-9]\+.*fullusb.*\).img/\1/pi'`"
+            ;;
+        liteusb)
+            _version="`ls $_gzroot/dos/FD*.img 2>/dev/null | sed -n 's/.*FD\([0-9]\+.*liteusb.*\).img/\1/pi'`"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [ "$_menu_action" = "add" ]; then
+        [ -z "$_version" ] && return 1
+    fi
+    _node=/dos/freedos+$_imgtype
+    _title="FreeDOS $_version"
+    _class=freedos
+    _menu_code="
+    if [ \$grub_cpu = 'i386' -a \$grub_platform = 'pc' ]; then
+        if [ -f /boot/syslinux/4.07/bin/memdisk ]; then
+            linux16 /boot/syslinux/4.07/bin/memdisk raw
+            initrd16 /dos/FD$_version.img
+        fi
+    fi
+    "
+    gz_menu "$_menu_action" "$_grubroot" "$_node" "$_title" "$_class" "$_menu_code"
+    [ "$_menu_action" != "remove" ] && _submenu_dos $_grubroot $_node
+}
+
+# @param gzroot,distros-info
+gz_menu_distros() {
+    _menu_action=$1
+    _gzroot=$2
+    shift 2
+    _distros_info=$*
+
+    gz_log_debug "$FUNCNAME: menu-action -> $_menu_action, distros-info -> $_distros_info"
+    [ "$_distros_info" ] || return 0
+    _distros_info=`echo $_distros_info | sed 's/+/ /g'`
+    gz_distros_parse $_distros_info
+
+    for _distro_info in $_distros_info; do
+        _img_types=`echo $_distro_info | awk -F : '{print $2}' | sed 's/,/ /g'`
+        _distro=`echo $_distro_info | awk -F : '{print $1}'`
+        [ "$_img_types" ] || _img_types=$(eval echo \$${_distro}_type | sed 's/,/ /g')
+
+        for _img_type in $_img_types; do
+            eval _menu_$_distro "$_menu_action" "$_gzroot" "$_img_type"
+        done
+    done
+}
+
+gz_cleanup_menu() {
+    _grubroot="`echo $1 | sed 's|/\+|/|g'`"
+    [ -z "$_grubroot" -o $_grubroot = "/" ] && return 1
+    rm -f $_grubroot/$GZ_GRUB_CFG
+    rm -rf $_grubroot/$GZ_GRUB_CFGD
+}
+
+:<<UNIT_TEST
+# @param action,gzroot,fs-label,distros-info
+main() {
+    source gz_logger
+    source gz_download
+    gz_set_log_level $LOG_DEBUG
+
+    action=$1; shift
+    echo "remove add update" | grep $action > /dev/null || exit 1
+    gzroot=$1; shift
+    [ -d "$gzroot" ] || return 1
+    fs_label=${1-$GZ_FS_LABEL}; shift
+    distros_info="$*"
+    gzroot=`echo $gzroot | sed 's|/$||g'`
+    grubroot=`echo "$gzroot/$GZ_GRUB_ROOT" | sed 's|/\+|/|g'`
+
+    if [ ! "$distros_info" ]; then
+        echo clean/reinstall
+        action=add
+        distros_info="$GZ_DOWNLOAD_DISTROS_ALL"
+        gz_cleanup_menu $grubroot
+        gz_rootmenu $grubroot $fs_label
+        gz_submenu $action $grubroot /bsd "Installation of BSD x86_64"
+        gz_submenu $action $grubroot /esxi "Installation of VMWare ESXi"
+
+        gz_submenu $action $grubroot /linux/liveiso "Live Linux ISO"
+        gz_submenu $action $grubroot /linux/livedsk "Live Linux on usb drive"
+        gz_submenu $action $grubroot /linux/netboot "Net installation Linux"
+        gz_submenu $action $grubroot /bsd/netboot "Net Installation of BSD"
+
+        gz_menu $action $grubroot /empty ""
+    fi
+
+    gz_menu_distros $action $gzroot "$distros_info"
+}
+
+main $*
+UNIT_TEST

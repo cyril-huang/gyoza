@@ -1,0 +1,290 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+DIALOG_SUCCEEDED=0
+DIALOG_FAILED=1
+DIALOG_PASSED=2
+DIALOG_COMPLETED=3
+DIALOG_CHECKED=4
+DIALOG_DONE=5
+DIALOG_SKIPPED=6
+DIALOG_IN_PROGRESS=7
+
+_GZ_DRAW_INFO=
+
+gz_draw_info_clean() {
+    _GZ_DRAW_INFO=
+}
+
+# @param title,file,total_size
+gz_draw_info_add() {
+    _title=$1
+    _file=$2
+    _total_size=$3
+
+    if [ ! "`echo $_total_size | sed '/^[1-9][0-9]\+/p'`" ]; then
+        gz_log_debug "$FUNCNAME: _total_size -> $_total_size"
+        return 1
+    fi
+
+    [ "$_GZ_DRAW_INFO" ] && _GZ_DRAW_INFO="$_GZ_DRAW_INFO,"
+    _GZ_DRAW_INFO="$_GZ_DRAW_INFO{\"title\":\"$_title\", \"filepath\":\"$_file\", \"total_size\":$_total_size}"
+    return 0
+}
+
+gz_draw_info_get() {
+    echo "[ $_GZ_DRAW_INFO ]"
+}
+
+# @param bgtitle,wintitle,num_info,draw_info
+gz_draw_dialog_mixedgauge() {
+    _bgtitle="$1"
+    _wintitle="$2"
+    _gtitle=$3
+    _num_info="$4"
+    shift 4
+    _all_draw_info=$*
+    _all_current_size=0
+    _all_total_size=0
+    _all_gauge_info=
+
+    _done_drawing=1
+
+    set --
+    for _n in `seq 0 $_num_info`; do
+        _title=`echo $_all_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_n]['title'])"`
+        _file=`echo $_all_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_n]['filepath'])"`
+        _total_size=`echo $_all_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_n]['total_size'])"`
+
+        [ "$_title" ] || _title="$_file"
+        if [ -f "$_file" ]; then
+            _current_size=`stat -c "%s" $_file`
+            if [ "$_total_size" -gt 0 ]; then
+                _all_current_size="`expr $_all_current_size + $_current_size`"
+                _all_total_size="`expr $_all_total_size + $_total_size`"
+                _current_rate="-`expr $_current_size \* 100 / $_total_size`"
+                if [ $_current_size -lt $_total_size ]; then
+                    _done_drawing=0
+                    _current_size=$_total_size
+                fi
+            else
+                _current_rate=$DIALOG_FAILED
+            fi
+        else
+            _current_rate=$DIALOG_FAILED
+        fi
+        set -- "$@" "$_title" "$_current_rate"
+    done
+
+    [ $_all_total_size -gt 0 ] && _all_total_rate="`expr $_all_current_size \* 100 / $_all_total_size`"
+
+    dialog --backtitle "$_bgtitle" \
+           --begin 3 3 \
+           --title "$_wintitle" \
+           --mixedgauge "Total cost: $_gtitle" 0 0 "$_all_total_rate" \
+           "$@"
+
+    return $_done_drawing
+}
+
+# @param y,title,file,total_size,total_cost
+# with json format parameter to pass object
+gz_draw_file_progress() {
+    __y="$1"
+    _title="$2"
+    _file="$3"
+    _total_size="$4"
+    _total_cost="$5"
+    _done_drawing=0
+
+    [ "$_file" ] || return 1
+
+    _info_text="999.9G 1000s"
+    #          "100%  100M/s"
+    _width_term=$(expr `tput cols` - 1)
+    _width_bar=$(expr $_width_term - ${#_info_text} - 4)
+    _current_progress=2
+
+    [ "$_title" ] || _title=$_file
+    if [ -f "$_file" -o -f "$_file.size" ]; then
+        [ -f "$_file" ] && _current_size=`stat -c "%s" $_file`
+        [ -f "$_file.size" ] && _current_size=`cat $_file.size`
+
+        if [ "$_total_size" -gt 0 ]; then
+            if [ $_current_size -ge $_total_size ]; then
+                _done_drawing=1
+                _current_size=$_total_size
+                _last_cost=`echo "$_GZ_DONE_TOTAL_COST" | sed -n 's/.*\b'$__y':\([0-9]\+\)\b.*/\1/p'`
+                if [ ! "$_last_cost" ]; then
+                    _GZ_DONE_TOTAL_COST="$_GZ_DONE_TOTAL_COST $__y:$_total_cost"
+                    _last_cost=$_total_cost
+                fi
+            else
+                _last_cost=$_total_cost
+            fi
+
+            _rate=`echo | awk '{printf("%.1f", 100 * c / t)}' c=$_current_size t=$_total_size`
+            _speed=`echo | awk '{printf("%.1f", s / c)}' s=$_current_size c=$_last_cost`
+            _current_progress=`expr $_current_size \* $_width_bar / $_total_size`
+            [ $_current_progress -eq 0 ] && _current_progress=2
+
+            _human_total_cost="${_last_cost}s"
+            _human_current_size="`numfmt --to=iec $_current_size`"
+            _human_rate="${_rate}%"
+            _human_speed="`numfmt --to=iec $_speed`/s"
+            _title_color=2
+        else
+            _human_total_cost=${_total_cost}s
+            _human_current_size=0
+            _human_rate=0%
+            _human_speed=0B/s
+            _done_drawing=1
+            _title_color=1
+            _errmsg="$_file expected size: $_total_size, check configuration"
+            echo -n "[38;5;1m[`expr $__y`;`expr $_width_bar - ${#_errmsg} + 1`H$_errmsg"
+        fi
+    else
+        gz_log_debug "$FUNCNAME: No file $_file existed yet"
+        _human_total_cost=${_total_cost}s
+        _human_current_size=0
+        _human_rate=0%
+        _human_speed=0B/s
+        if [ "$_total_cost" -gt 5 ]; then
+            _title_color=1
+            _errmsg="$_file not available, check permission or network"
+            echo -n "[38;5;1m[`expr $__y`;`expr $_width_bar - ${#_errmsg} + 1`H$_errmsg"
+            _done_drawing=1
+        else
+            _title_color=2
+        fi
+    fi
+
+    [ "$_prev_width_term" = "$_width_term" ] || clear
+    _prev_width_term=$_width_term
+
+    echo "[38;5;${_title_color}m[$__y;0H$_title[39m"
+    echo "[$__y;`expr $_width_bar + 2`H $_human_current_size   "
+    echo "[$__y;`expr $_width_bar + 9`H $_human_total_cost   "
+    echo "[`expr $__y + 1`;0H["
+    echo "[`expr $__y + 1`;`expr $_width_bar + 1`H]"
+    echo "[`expr $__y + 1`;`expr $_width_bar + 2`H $_human_rate   "
+    echo "[`expr $__y + 1`;`expr $_width_bar + 9`H $_human_speed   "
+    echo "[`expr $__y + 1`;2H`printf '=%.0s' $(seq 2 $_current_progress)`"
+    echo "[`expr $__y + 1`;${_current_progress}H>"
+
+    return $_done_drawing
+}
+
+# @param draw_title [{"title":"title 1","filepath": "fpath1","total":size]}, ...]
+gz_draw_all_files_progress() {
+    _draw_title="$1"
+    _all_draw_info="$2"
+    _tick_time=1
+    _total_cost=1
+    _tick=`echo | awk '{printf("%d", c / tt)}' c=$_total_cost tt=$_tick_time`
+    _done=
+
+    [ "$_all_draw_info" ] || return 1
+    _num_info=`echo $_all_draw_info | python3 -c "import sys, json; print(len(json.load(sys.stdin)))"`
+    [ "$_num_info" -eq 0 ] && return 0
+    _num_info=`expr $_num_info - 1`
+
+    _GZ_DONE_TOTAL_COST=
+    _start_time=`date`
+    _with_dialog=`which dialog 2>/dev/null`
+    [ "$_with_dialog" ] || echo -n "[?25l"
+    sleep $_total_cost
+    while [ ! "$_done" ]; do
+        _done=yes
+        if [ "$_with_dialog" ]; then
+            gz_draw_dialog_mixedgauge "$_draw_title" "$_start_time" "${_total_cost}s" "$_num_info" "$_all_draw_info"
+            [ $? = 0 ] && _done=
+        else
+            for _n in `seq 0 $_num_info`; do
+                _y=`expr $_n \* 2 + 1`
+                _title=`echo $_all_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_n]['title'])"`
+                _file=`echo $_all_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_n]['filepath'])"`
+                _total_size=`echo $_all_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_n]['total_size'])"`
+                gz_draw_file_progress "$_y" "$_title" "$_file" "$_total_size" "$_total_cost"
+                [ $? = 0 ] && _done=
+            done
+        fi
+        _tick=`expr $_tick + 1`
+        sleep $_tick_time
+        _total_cost=`echo | awk '{printf("%d", t * tt)}' t=$_tick tt=$_tick_time`
+    done
+}
+
+gz_cleanup_draw_file_progress() {
+    echo -n "[0m"
+    echo -n "[?25h"
+}
+
+:<<UNIT_TEST
+produce_files() {
+    my_draw_info="$1"
+    num=`echo $my_draw_info | python3 -c "import sys, json; print(len(json.load(sys.stdin)))" 2>/dev/null`
+    [ "$num" ] || exit 1
+    num=`expr $num - 1 2>/dev/null`
+    done_file=
+    while [ ! "$done_file" ]; do
+        done_file=yes
+        for _my_n in `seq 0 $num`; do
+            myfile=`echo $my_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_my_n]['filepath'])" 2> /dev/null`
+            total_size=`echo $my_draw_info | python3 -c "import sys, json; print(json.load(sys.stdin)[$_my_n]['total_size'])" 2>/dev/null`
+            if [ -f $myfile ]; then
+                if [ `stat -c "%s" $myfile 2>/dev/null` -lt $total_size ]; then
+                    done_file=
+                    dd if=/dev/zero of=/run/user/`id -u`/file bs=${RANDOM} count=1 > /dev/null 2>&1
+                    cat /run/user/`id -u`/file  >> $myfile
+                fi
+            else
+                touch $myfile > /dev/null 2>&1
+                done_file=
+            fi
+            sleep 0.5
+        done
+    done
+}
+
+main() {
+    draw_title="testing drawing"
+
+    file1=/tmp/test1
+    file2=/test2
+    file3=/tmp/test3
+    source gz_logger
+    gz_set_log_level $LOG_DEBUG
+    trap "gz_cleanup_draw_file_progress" INT
+
+    for n in `seq 3`; do
+        title="titel $n"
+        file=$(eval echo \$file$n)
+        total_size=`expr ${RANDOM} \* 10`
+        gz_draw_info_add "$title" "$file" "$total_size"
+        [ -f "$file" ] && rm $file
+    done
+    draw_info=`gz_draw_info_get`
+
+    produce_files "$draw_info" &
+    gz_draw_all_files_progress "$draw_title" "$draw_info"
+    gz_cleanup_draw_file_progress
+}
+
+main $*
+UNIT_TEST

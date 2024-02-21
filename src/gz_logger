@@ -1,0 +1,160 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+LOG_EMERG=0
+LOG_ALERT=1
+LOG_CRIT=2
+LOG_ERR=3
+LOG_WARNING=4
+LOG_NOTICE=5
+LOG_INFO=6
+LOG_DEBUG=7
+
+__log_level=$LOG_ERR
+__log_action="gyoza.log" #format: "stdout,stderr,syslog,filename"
+
+__logstr() {
+    __msg_level=$1
+    case $__msg_level in
+        $LOG_EMERG)
+            echo "emerg"
+            ;;
+        $LOG_ALERT)
+            echo "alert"
+            ;;
+        $LOG_CRIT)
+            echo "crit"
+            ;;
+        $LOG_ERR)
+            echo "err"
+            ;;
+        $LOG_WARNING)
+            echo "warning"
+            ;;
+        $LOG_NOTICE)
+            echo "notice"
+            ;;
+        $LOG_INFO)
+            echo "info"
+            ;;
+        $LOG_DEBUG)
+            echo "debug"
+            ;;
+        *)
+    esac
+}
+
+gz_log() {
+    __msg_level=$1; shift
+    __msg=$*
+
+    if [ "$__msg_level" -le "$__log_level" ]; then
+        for __action in `echo $__log_action | sed 's/,/ /g'`; do
+            case $__action in
+                stdout)
+                    echo $__msg 
+                    ;;
+                stderr)
+                    echo $__msg >&2
+                    ;;
+                syslog)
+                    logger -i -p user.`__logstr $__msg_level` $__msg
+                    ;;
+                *)
+                    echo $__msg >> $__action
+                    ;;
+            esac
+        done
+    fi
+}
+
+gz_date() {
+    date '+%Y:%m:%d-%H:%M:%S'
+}
+
+gz_log_emerg() {
+    gz_log $LOG_EMERG "`gz_date`   EMERG: $*"
+}
+gz_log_alert() {
+    gz_log $LOG_ALERT "`gz_date`   ALERT: $*"
+}
+gz_log_crit() {
+    gz_log $LOG_CRIT "`gz_date`    CRIT: $*"
+}
+gz_log_err() {
+    gz_log $LOG_ERR "`gz_date`     ERR: $*"
+}
+gz_log_warning() {
+    gz_log $LOG_WARNING "`gz_date` WARNING: $*"
+}
+gz_log_notice() {
+    gz_log $LOG_NOTICE "`gz_date`  NOTICE: $*"
+}
+gz_log_info() {
+    gz_log $LOG_INFO "`gz_date`    INFO: $*"
+}
+gz_log_debug() {
+    gz_log $LOG_DEBUG "`gz_date`   DEBUG: $*"
+}
+
+# issue of type weak language, need to validate all input format
+gz_set_log_level() {
+    [ "`echo $1 | sed -n '/^[0-7]$/p'`" ] || return 1
+    [ "$1" ] && __log_level=$1
+}
+
+gz_set_log_action() {
+    [ "$1" ] && __log_action=$1
+}
+
+gz_cleanup_logger() {
+    [ -f $__log_action ] && rm $__log_action
+}
+
+gz_log_err_exit() {
+    [ "$*" ] || return 0
+    echo $* >&2 && gz_log_err "$*"
+    exit 1
+}
+
+gz_log_stderr() {
+    [ "$*" ] || return 0
+    echo $* >&2
+}
+
+gz_log_stdout() {
+    [ "$*" ] || return 0
+    echo $*
+}
+
+gz_msg() {
+    gz_log_stdout $*
+}
+
+:<< UNIT_TEST
+main() {
+    gz_log_emerg "testing"
+    gz_set_log_action "stderr,syslog,mylog.log"
+    gz_set_log_level $LOG_ALERT
+    gz_log_info "this is INFO"
+    gz_set_log_level $LOG_DEBUG
+    gz_log_debug "this is INFO"
+}
+
+main *
+UNIT_TEST

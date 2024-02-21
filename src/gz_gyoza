@@ -1,0 +1,942 @@
+#!/bin/bash
+# Copyright (C) 2023 Cyril Huang - All Rights Reserved
+# GPLv3
+:<<COPYRIGHT
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+COPYRIGHT
+
+COMPANY="GYOZA Associate Inc"
+MAJOR_VERSION=0
+MINOR_VERSION=0
+PATCH_VERSION=1
+VERSION=$MAJOR_VERSION.$MINOR_VERSION.$PATCH_VERSION
+PROJECT_NAME=newton
+PROGRAM_NAME=`basename $0`
+PROGRAM_REALPATH=`which $PROGRAM_NAME`
+[ "$PROGRAM_REALPATH" ] || PROGRAM_REALPATH=$(realpath $0)
+[ -f "$PROGRAM_REALPATH" ] || gz_log_err_exit "Can not find real path of $PROGRAM_NAME"
+
+print_title() {
+    cat -<<TITLE
+
+Copyright (c) $COMPANY 2023-`date +"%Y"` All rights reserved
+$PROGRAM_NAME : A utility to create multiple installlation/live USB.
+===========================================================================
+
+TITLE
+}
+
+usage_info() {
+    print_title
+    cat -<<USAGE_INFO
+Print information of device and it also shows the information of ESXi,
+Windows or DOS id for $PROGRAM_NAME deport command
+
+$PROGRAM_NAME info dev|img
+
+USAGE_INFO
+
+}
+usage_test() {
+    print_title
+    cat -<<USAGE_TEST
+Test device or image with qemu-system.
+
+$PROGRAM_NAME test dev|img [options]
+
+options:
+ -u|--uefi : Test with qemu OVMF UEFI bios.
+
+USAGE_TEST
+}
+usage_supported() {
+    print_title
+    cat -<<USAGE_SUPPORTED
+$PROGRAM_NAME supported
+
+If there is no type specified, it represents that all types will be used in
+command. There are 2 special pre-defined reserved words can be used as well.
+
+ all     : represent all distributions
+ default : represent archlinux+debian
+
+USAGE_SUPPORTED
+    for _distro in $GZ_DISTROS_ALL; do
+        echo "        $_distro:$(eval echo \$${_distro}_type)"
+    done
+    echo ""
+}
+usage_theme() {
+    print_title
+    cat -<<USAGE_THEME
+Add/delete/select GRUB theme to/from device or select the theme in the device
+to be used. GRUB theme directory is with theme.txt and icons directory inside.
+
+There is a theme named "default" shipped with product.
+
+$PROGRAM_NAME theme dev|img|dir theme-dir [theme-name] [options]
+
+argv:
+ dev        : device as /dev/sdc, sdc ... and so on
+ img        : raw disk image file
+ dir        : file system with grub installed mounted on
+ theme-dir  : directory where is with the GRUB theme structure
+ theme-name : theme name will be used in the device, default is theme-dir
+
+options
+ -A|--add    : add theme to device, if no options provided, it will be add
+ -D|--delete : delete theme from the device
+ -S|--select : The theme name (directory) will be used in the device. If
+               --select used, the 2nd argv will be the theme-name in the
+               device
+
+Example:
+ $PROGRAM_NAME theme /dev/sdc default --select
+ $PROGRAM_NAME theme /dev/sdc /home/me/mytheme lovely
+ $PROGRAM_NAME theme /dev/sdc lovely --select
+ $PROGRAM_NAME theme /dev/sdc lovely --delete
+ $PROGRAM_NAME theme /dev/sdc okita myokita --add --select
+
+USAGE_THEME
+}
+usage_deport() {
+    print_title
+    cat -<<USAGE_DEPORT
+Deport ESXi/MS-Windows/MS-DOS from multiple boot system. See $PROGRAM_NAME
+info command.
+
+$PROGRAM_NAME deport dev|img|dir id
+
+argv:
+ dev : device as /dev/sdc, sdc ... and so on
+ img : raw disk image file
+ dir : file system with grub installed mounted on
+ id  : the directory or id in device for ISO extracted files or the MS-DOS
+       image file name to be deleted from the system. $PROGRAM_NAME info can
+       get the id with version:id format in OS installed information.
+
+Example:
+ $PROGRAM_NAME deport /dev/sdc esxi-6.7
+ $PROGRAM_NAME deport windows.img /windows/win10
+ $PROGRAM_NAME deport /dev/sdc msdos.img
+
+USAGE_DEPORT
+}
+usage_import() {
+    print_title
+    cat -<<USAGE_IMPORT
+Import ESXi/MS-Windows ISO file or MS-DOS image file into multiple boot system.
+
+$PROGRAM_NAME import dev|img|dir import-img[:dir:ver] [options]
+
+argv:
+ dev : device as /dev/sdc, sdc ... and so on
+ img : raw disk image file
+ dir : file system with grub installed mounted on
+ import-img: ISO or IMG filepath
+ dir       : optional directory in device for ISO/IMG files extracted, "-" is
+             not allowed in the directory name.
+             esxi default is /esxi/\$ver
+             windows default is /windows/{1,2,3...}
+             dos default is /dos
+ ver       : optional version string, $PROGRAM_NAME try to guess version
+             number if it's not given and use the version guessed for
+             directory put into device.
+
+options:
+ -p|--passtpm: Try to boot Windows 11 or above without checking TPM.
+
+Example:
+ $PROGRAM_NAME import /dev/sdc esxi-6.7.iso:/vmware/esx6.7
+ $PROGRAM_NAME import windows.img window10.iso
+ $PROGRAM_NAME import /dev/sdd msdos.img::6.22
+
+USAGE_IMPORT
+}
+usage_remove() {
+    print_title
+    cat -<<USAGE_REMOVE
+Remove distribution supported from device, image or directory.
+
+$PROGRAM_NAME remove dev|img|dir distros-info
+
+argv:
+ dev      : device as /dev/sdc, sdc ... and so on
+ img      : raw disk image file
+ dir      : file system with grub installed mounted on
+ distros  : distros information, see command supported
+
+Example:
+ $PROGRAM_NAME remove /mnt/usb kali:netboot
+ $PROGRAM_NAME remove /dev/sdc archlinux debian
+USAGE_REMOVE
+}
+usage_add() {
+    print_title
+    cat -<<USAGE_ADD
+Add new distribution supported into device, image or directory.
+
+$PROGRAM_NAME add dev|img|dir distros-info
+
+argv:
+ dev      : device as /dev/sdc, sdc ... and so on
+ img      : raw disk image file
+ dir      : file system with grub installed mounted on
+ distros  : distros information, see command supported
+
+Example:
+ $PROGRAM_NAME add /mnt/usb kali:netboot
+ $PROGRAM_NAME add /dev/sdc archlinux debian
+USAGE_ADD
+}
+usage_update() {
+    print_title
+    cat -<<USAGE_UPDATE
+Update all distribution version in current device to latest one if no distros
+information given. On the other hand, it will just update the image of distros
+in current device to latest version if distros information is given.
+
+$PROGRAM_NAME update dev|img|dir [distros-info]
+
+argv:
+ dev      : device as /dev/sdc, sdc ... and so on
+ img      : raw disk image file
+ dir      : file system with grub installed mounted on
+ distros  : distros information, see command supported
+
+Example:
+ $PROGRAM_NAME update /dev/sdc archlinux
+
+USAGE_UPDATE
+}
+usage_remenu() {
+    print_title
+    cat -<<USAGE_REMENU
+Remenu can re-create GRUB menu according to current directory inside device,
+image or directory if there is no distros-info given. It just updates the
+menu information of distros if distros-info given.
+
+$PROGRAM_NAME remenu dev|img|dir [distros-info] [options]
+
+argv:
+ dev      : device as /dev/sdc, sdc ... and so on
+ img      : raw disk image file
+ dir      : file system with grub installed mounted on
+ distros  : distros information, see command supported
+
+options:
+    --fs-label : FAT32 label will be used, root privilege required
+ -t|--theme    : theme name will be used
+
+Example:
+ $PROGRAM_NAME remenu /dev/sdc
+ $PROGRAM_NAME remenu /dev/sdc archlinux debian
+USAGE_REMENU
+}
+usage_extract() {
+    print_title
+    cat -<<USAGE_EXTRACT
+Extract files from an image file in /linux/liveiso to /linux/liveiso/distro
+or extract files from arbitrary image to an destination directory specified.
+
+$PROGRAM_NAME extract dev|img|dir distros
+$PROGRAM_NAME extract dev|img dest-dir files
+
+argv:
+ dev      : device as /dev/sdc, sdc ... and so on
+ img      : raw disk image file
+ dir      : file system with grub installed mounted on
+ distros  : distros information, see command supported
+ dest-dir : destination directory
+ files    : filepath list from the file system of device
+
+USAGE_EXTRACT
+}
+usage_download() {
+    print_title
+    cat -<<USAGE_DOWNLOAD
+Download distributions supported by $PROGRAM_NAME to the special directory
+structure or download multiple URLs specified by user to a destination
+directory.
+
+$PROGRAM_NAME download dev|img|dir [distros-info]
+$PROGRAM_NAME download dev|img|dir dest-dir [urls-info]
+
+argv:
+ dev      : device as /dev/sdc, sdc ... and so on
+ img      : raw disk image file
+ dir      : file system with grub installed mounted on
+ distros  : distros information, see command supported
+ dest-dir : destination directory
+ urls     : http url list to download
+
+USAGE_DOWNLOAD
+}
+usage_create() {
+    print_title
+    cat -<<USAGE_CREATE
+Create a device or image with FAT32 label specified and special directory
+structure for all distributions supported.
+
+$PROGRAM_NAME create dev|img [options] [distros-info]
+
+argv:
+ dev      : device as /dev/sdc, sdc ... and so on
+ img      : raw disk image file
+ distros  : distros information, see command supported
+
+options:
+ -s|--size     : size of image, default 8G
+    --fs-label : file system label, default GYOZA
+
+Example:
+ $PROGRAM_NAME create /dev/sdc archlinux
+ $PROGRAM_NAME create my.img default -s 16G
+
+USAGE_CREATE
+}
+usage() {
+    print_title
+    cat -<<USAGE
+$PROGRAM_NAME command argv [options]
+command:
+
+ create    : create a device
+ download  : download supported distribution files
+ extract   : extract required files from ISO download
+ remenu    : re-generate GRUB booting menu
+ update    : update latest version of distribution in device
+ add       : add distribution into device
+ remove    : remove distribution from device
+ test      : test the device created
+ supported : list supported distributions and types
+ info      : information of device
+ import    : import ESXi, MS-Windows ISO or DOS image into device
+ deport    : remove ESXi, MS-Windows or DOS from device
+ theme     : GRUB theme management
+ help      : help
+
+options: global options
+
+ -f|--force   : force action
+ -l|--log     : log level of system with value emerg ~ debug, default LOG_ERR
+ -L|--logfile : log file, default gyoza.log
+
+Example:
+ $PROGRAM_NAME create /dev/sdc archlinux
+ $PROGRAM_NAME update imgfile.img debian:netboot
+ $PROGRAM_NAME download sdc fedora manjaro
+ $PROGRAM_NAME remove /mnt/usb ubuntu
+ $PROGRAM_NAME create help
+
+USAGE
+}
+
+gyoza_supported() {
+    usage_supported
+}
+
+gyoza_theme() {
+    _dev=$1
+    _theme_dir="$2"
+    _theme_name="$3"
+
+    [ "$_theme_dir" ] || return 1
+    [ "$_theme_name" ] || _theme_name="`basename "$_theme_dir"`"
+
+    _gzroot=`gz_get_dev_mnt $_dev` || exit 1
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+
+    if [ ! -f $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFG ]; then
+        gz_msg "No grub.cfg file existed"
+        gz_log_debug "$FUNCNAME: /boot/grub/ -> `ls $_gzroot/$GZ_GRUB_ROOT`"
+        gz_cleanup_dev_mnt $_gzroot
+        return 1
+    fi
+
+    if [ -z "$GZ_THEME_DELETE" ]; then
+        if [ -z "$GZ_THEME_SELECT" -o "$GZ_THEME_ADD" ]; then
+            if [ -d $_gzroot/theme/"$_theme_name" -a -z "$GZ_FORCE" ]; then
+                gz_msg "$_theme_name has been existed already"
+                gz_cleanup_dev_mnt $_gzroot
+                return 1
+            fi
+            if [ -d "$_theme_dir" ]; then
+                if [ ! -f "$_theme_dir"/theme.txt ]; then
+                    gz_msg "Not a valid theme directory, there should be a GRUB theme.txt inside"
+                    gz_cleanup_dev_mnt $_gzroot
+                    return 1
+                fi
+                mkdir -p $_gzroot/theme/"$_theme_name"
+                cp -r "$_theme_dir"/. $_gzroot/theme/"$_theme_name"
+            else
+                if [ "$_theme_dir" = "default" ]; then
+                    if [ ! -d $_gzroot/theme/default -o -n "$GZ_FORCE" ]; then
+                        pushd . > /dev/null
+                        _start_of_binary=$(expr `sed -n '/^exit 0/=' $PROGRAM_REALPATH` + 1)
+                        cd $_gzroot; sed -n "$_start_of_binary"',$p' $PROGRAM_REALPATH | tar zxvf - theme
+                        popd > /dev/null
+                    fi
+                    _theme_name=default
+                else
+                    gz_msg "No $_theme_dir existed"
+                    gz_cleanup_dev_mnt $_gzroot
+                    return 1
+                fi
+            fi
+        fi
+    else
+        if [ "$_theme_name" = "default" ]; then
+            gz_msg "Can not remove default theme"
+            gz_cleanup_dev_mnt $_gzroot
+            return 1
+        fi
+        if [ ! -d $_gzroot/theme/"$_theme_name" ]; then
+            gz_msg "No such theme, $_theme_name in the device"
+            gz_cleanup_dev_mnt $_gzroot
+            return 1
+        fi
+        rm -rf -d $_gzroot/theme/"$_theme_name"
+        grep "^set theme.*$_theme_name.*" $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFG &&
+            sed -i 's|^set theme.*|set theme=|' $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFG
+        return 0
+    fi
+
+    if [ "$GZ_THEME_SELECT" ]; then
+        if [ ! -d $_gzroot/theme/"$_theme_name" ]; then
+            gz_msg "No such theme, $_theme_name, available"
+            return 1
+        fi
+
+        sed -i 's|^set theme.*|set theme=/theme/'"$_theme_name"'/theme.txt|1' $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFG
+    fi
+
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gyoza_deport() {
+    _dev=$1; shift
+
+    for _deport_id in $*; do
+        gz_deport $_dev $_deport_id
+    done
+    gz_cleanup_import
+}
+
+gyoza_import() {
+    _dev=$1; shift
+
+    for _import_info in $*; do
+        gz_import $_dev $_import_info
+    done
+    gz_cleanup_import
+}
+
+gyoza_info() {
+    _dev=$1
+
+    [ "$_dev" ] || gz_log_err_exit "No device specified"
+
+    _gzroot=`gz_get_dev_mnt $_dev` || exit 1
+    _grubcfgd="$_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFGD"
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+
+    _pdev=$(df | grep "$_gzroot" | awk '{print $1}')
+    _cap=`expr $(df | grep "$_gzroot" | awk '{print $2}') \* 1024`
+    _free=`expr $(df | grep "$_gzroot" | awk '{print $4}') \* 1024`
+
+    print_title
+    gz_msg "Device $_dev:"
+    [ -d "$_dev" ] || gz_msg "Label `/sbin/fatlabel $_pdev 2>/dev/null | tail -n1`"
+    gz_msg "Capacity: `numfmt --to=iec $_cap` Free: `numfmt --to=iec $_free`"
+    gz_msg ""
+
+    _available_distros=$GZ_DISTROS_ALL
+    gz_msg "Installed:"
+    echo "-----------------------------------------------------------------"
+    for _os in linux bsd sysv; do
+        echo "`echo $_os | tr '[:lower:]' '[:upper:]'`:"
+        for _type in liveiso netboot; do
+            _installed=
+            echo "    $_type:"
+            if [ -f "$_grubcfgd/$_os/$_type.cfg" ]; then
+                _installed=`cat $_grubcfgd/$_os/$_type.cfg | awk -F "'" '/^menuentry/{print $2}' | sort -u | tr '\n' ','`
+                _menus_installed=`cat $_grubcfgd/$_os/$_type.cfg | sed -n 's/.*--id \([a-z=-]\+\).*/\1/p' | sed 's|-|/|g'`
+
+                for _menu_installed in $_menus_installed; do
+                    _distro_installed="`basename $_menu_installed`"
+                    _distro_type=$(eval echo \$${_distro_installed}_type)
+                    eval ${_distro_installed}_type=`echo $_distro_type | sed 's/,\?'$_type',\?//g'`
+                done
+            fi
+            echo "         $_installed"
+        done
+    done
+
+    echo "DOS:"
+    if [ -f "$_grubcfgd/dos.cfg" ]; then
+        while read -r _dos_title; do
+            _os_menu_id=`cat $_grubcfgd/dos.cfg | sed -n "s/menuentry.*$_dos_title.*id \w\+-\(.*\) {.*/\1/p"`
+            _type_freedos=$(echo $_os_menu_id | sed -n 's/^freedos+\(.*\)/\1/p')
+            if [ "$_type_freedos" ]; then
+                echo "    $_dos_title"
+                freedos_type=$(echo $freedos_type | sed 's/,\?'"$_type_freedos"',\?//g')
+            else
+                echo "    $_dos_title:$_os_menu_id"
+            fi
+        done< <(cat $_grubcfgd/dos.cfg | sed -n 's/.*menuentry.*'"'"'\(.*\)'"'"'.*/\1/p')
+    fi
+
+    gz_import_info_dev $_grubcfgd
+
+    echo ""
+ 
+    __n=0
+    gz_msg "Distribution Availables:"
+    echo "-----------------------------------------------------------------"
+    for _distro in $GZ_DISTROS_ALL; do
+        _available_type=$(eval echo \$${_distro}_type)
+        if [ "$_available_type" ]; then
+            if [ $__n -lt 2 ]; then
+                echo -n "$_distro:$_available_type "
+                __n=`expr $__n + 1`
+            else
+                echo "$_distro:$_available_type "
+                __n=0
+            fi
+        fi
+    done
+    echo ""
+    echo ""
+
+    gz_msg "Theme Availables:"
+    echo "-----------------------------------------------------------------"
+    _theme_selected=`cat $_gzroot/$GZ_GRUB_ROOT/$GZ_GRUB_CFG | sed -n 's|^set theme=/theme/\(.*\)/theme.txt|\1|p'`
+    if [ "$_theme_selected" ]; then
+        echo `ls $_gzroot/theme 2>/dev/null | sed 's|\('$_theme_selected'\)|[\1]|'`
+    else
+        echo `ls $_gzroot/theme 2>/dev/null`
+    fi
+
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gyoza_test() {
+    _dev=$1
+    _bios=${2-$GZ_TEST_UEFI}
+
+    which qemu-system-`uname -m` > /dev/null || gz_log_err_exit "No qemu-system-`uname -m` available, skip device test"
+
+    if [ -f "$_dev" -a "`file $_dev | grep -i MBR`" -o -b $_dev ] ; then
+        read -p "Test with qemu-system-`uname -m` (Y/N) " _testqemu
+        [ ! "`echo $_testqemu | sed -n '/[Yy]\([Ee][Ss]\?\)\?/p'`" ] && exit 0
+
+        if [ "$_bios" = "uefi" ]; then
+            # FIXME: try different location for different distro
+            _ovmf=/usr/share/qemu/OVMF.fd
+            if [ -f $_ovmf ]; then
+                cp -f $_ovmf /run/user/`id -u`/bios.bin
+                _uefi_opt="-bios /run/user/`id -u`/bios.bin"
+            else
+                gz_msg "No Qemu UEFI installed"
+            fi
+        fi
+
+        gz_msg "Testing $_dev: `file $_dev`"
+        _timg=/run/user/`id -u`/hdd.img
+        qemu-img create -f qcow2 $_timg 8G
+        qemu-system-`uname -m` -m 4G -smp 2 -enable-kvm \
+            -boot menu=on \
+            -drive file=$_timg,format=qcow2 \
+            -drive file=$_dev,format=raw,if=none,id=usbstick \
+            -device nec-usb-xhci,id=xhci -device usb-storage,bus=xhci.0,drive=usbstick,bootindex=1 \
+            $_uefi_opt
+        rm -f /run/user/`id -u`/bios.bin
+        rm -f $_timg
+    else
+        gz_msg "$_dev is not a valid image or device"
+    fi
+}
+
+gyoza_remenu() {
+    _dev=$1; shift
+    _distros=$*
+
+    _gzroot=`gz_get_dev_mnt $_dev` || exit 1
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+    _grubroot="$_gzroot/$GZ_GRUB_ROOT"
+
+    if [ "$_distros" ]; then
+        gz_menu_distros update "$_gzroot" "$_distros"
+    else
+        _distros=$GZ_DISTROS_ALL
+        [ -f "$_grubroot/$GZ_GRUB_CFG" ] && mv $_grubroot/$GZ_GRUB_CFG $_grubroot/$GZ_GRUB_CFG.old
+        if [ -d "$_grubroot/$GZ_GRUB_CFGD" ]; then
+            rm -rf $_grubroot/$GZ_GRUB_CFGD.old
+            mv $_grubroot/$GZ_GRUB_CFGD $_grubroot/$GZ_GRUB_CFGD.old
+        fi
+        if [ "$GZ_THEME" ]; then
+            if [ ! -d $_gzroot/theme/$GZ_THEME ]; then
+                gz_msg "No such theme, $GZ_THEME, in the device"
+                GZ_THEME=
+            fi
+        else
+            gz_msg "No theme assigned! No theme in new menu!"
+        fi
+        gz_rootmenu $_grubroot $GZ_FS_LABEL $GZ_THEME
+        gz_menu_distros add "$_gzroot" "$_distros"
+
+        if [ -f $_grubroot/$GZ_GRUB_CFGD.old/dos.cfg ]; then
+            cp -f $_grubroot/$GZ_GRUB_CFGD.old/dos.cfg $_grubroot/$GZ_GRUB_CFGD
+            gz_submenu add $_grubroot /dos "$GZ_MENU_DOS_TITLE"
+        fi
+        if [ -f $_grubroot/$GZ_GRUB_CFGD.old/esxi.cfg ]; then
+            cp -f $_grubroot/$GZ_GRUB_CFGD.old/esxi.cfg $_grubroot/$GZ_GRUB_CFGD
+            gz_submenu add $_grubroot /esxi "$GZ_IMPORT_ESXI_MENU_TITLE"
+        fi
+        if [ -f $_grubroot/$GZ_GRUB_CFGD.old/windows.cfg ]; then
+            cp -f $_grubroot/$GZ_GRUB_CFGD.old/windows.cfg $_grubroot/$GZ_GRUB_CFGD
+            gz_submenu add $_grubroot /windows "$GZ_IMPORT_WINDOWS_MENU_TITLE"
+        fi
+    fi
+
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gyoza_remove () {
+    _dev=$1; shift
+    _distros=$*
+
+    [ "$_distros" ] || gz_log_err_exit "remove command requires distribution information"
+
+    _gzroot=`gz_get_dev_mnt $_dev` || exit 1
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+
+    for _distro_info in $_distros; do
+        _distro=`echo $_distro_info | awk -F : '{print $1}'`
+        _types=`echo $_distro_info | awk -F : '{print $2}' | sed 's/,/ /'`
+        [ "$_types" ] || _types=$(eval echo \$${_distro}_type | sed 's/,/ /')
+        case $_distro in
+            openbsd|netbsd) _os=bsd ;;
+            omnios) _os=sysv ;;
+            freedos) _os=dos ;;
+            *) _os=linux ;;
+        esac
+        for _type in $_types; do
+            [ -d $_gzroot/$_os/$_type/$_distro ] && rm -rf $_gzroot/$_os/$_type/$_distro
+            if [ "$_distro" = "freedos" ]; then
+                rm -f `find $_gzroot/dos -name "FD*.img" | grep -i $_type`
+                rm -f `find $_gzroot/dos -name "FD*.zip.size" | grep -i $_type`
+            fi
+            if [ $_type = "liveiso" ]; then
+                [ "$_distro" = "steamos" ] && _distro="holo"
+                _isofile=`ls $_gzroot/$_os/$_type/*.iso 2>/dev/null | grep -i "$_distro"`
+                _isofilebak=`ls $_gzroot/$_os/$_type/*.iso.bak 2>/dev/null | grep -i "$_distro"`
+                [ -f "$_isofile" ] && rm -f $_isofile
+                [ -f "$_isofilebak" ] && rm -f $_isofilebak
+            fi
+        done
+    done
+    gz_menu_distros remove $_gzroot $_distros
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gyoza_add() {
+    _dev=$1; shift
+    _distros=$*
+
+    [ "$_distros" ] || gz_log_err_exit "add command requires distribution information"
+
+    _gzroot=`gz_get_dev_mnt $_dev` || exit  1
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+
+    _new_distros=
+    for _distro_info in $_distros; do
+        _distro=`echo $_distro_info | awk -F : '{print $1}'`
+        _types=`echo $_distro_info | awk -F : '{print $2}' | sed s'/,/ /'`
+        [ "$_types" ] || _types=$(eval echo \$${_distro}_type | sed 's/,/ /')
+
+        case $_distro in
+            openbsd|netbsd) _os=bsd ;;
+            omnios) _os=sysv ;;
+            freedos) _os=dos ;;
+            *) _os=linux ;;
+        esac
+
+        _new_types=
+        for _type in $_types; do 
+            if [ "$_distro" = "freedos" ]; then
+                ls $_gzroot/dos/FD*.img 2>/dev/null | grep -i $_type || _new_types="$_new_types $_type"
+            elif [ ! -d $_gzroot/$_os/$_type/$_distro ]; then
+                _new_types="$_new_types $_type"
+            else
+                gz_msg "$_distro:$_type existed, no $_distro:$_type added"
+            fi
+        done
+        if [ "$_new_types" ]; then
+            _new_types=`echo $_new_types | sed 's/ /,/'`
+            _new_distros="$_new_distros $_distro:$_new_types"
+        fi
+    done
+
+    if [ "$_new_distros" ]; then
+        gz_download_distros "$_gzroot" "$_new_distros"
+        draw_title="Download Status"
+        draw_info=`gz_draw_info_get 2>/dev/null`
+        gz_draw_all_files_progress "$draw_title" "$draw_info"
+        gz_extract_distros "$_gzroot" "$_new_distros"
+        gz_menu_distros add "$_gzroot" "$_new_distros"
+        gz_cleanup_extract
+        gz_cleanup_download
+    fi
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gyoza_update() {
+    _dev=$1; shift
+    _distros=$*
+
+    [ "$_distros" ] || _distros=$GZ_DISTROS_ALL
+
+    _gzroot=`gz_get_dev_mnt $_dev` || exit 1
+    trap "gz_cleanup_dev_mnt $_gzroot" INT
+
+    _update_distros=
+    for _distro_info in $_distros; do
+        _distro=`echo $_distro_info | awk -F : '{print $1}'`
+        _types=`echo $_distro_info | awk -F : '{print $2}' | sed s'/,/ /'`
+        [ "$_types" ] || _types=$(eval echo \$${_distro}_type | sed 's/,/ /')
+        case $_distro in
+            openbsd|netbsd) _os=bsd ;;
+            omnios) _os=sysv ;;
+            freedos) _os=dos ;;
+            *) _os=linux ;;
+        esac
+
+        _update_types=
+        for _type in $_types; do 
+            if [ "$_distro" = "freedos" ]; then
+                ls $_gzroot/dos/FD*.img 2>/dev/null | grep -i $_type && _update_types="$_update_types $_type"
+            elif [ -d $_gzroot/$_os/$_type/$_distro ]; then
+                _update_types="$_update_types $_type"
+            fi
+        done
+        if [ "$_update_types" ]; then
+            _update_types=`echo $_update_types | sed 's/ /,/'`
+            _update_distros="$_update_distros $_distro:$_update_types"
+        fi
+    done
+
+    if [ "$_update_distros" ]; then
+        gz_download_distros "$_gzroot" "$_update_distros"
+        draw_title="Download Status"
+        draw_info=`gz_draw_info_get 2>/dev/null`
+        gz_draw_all_files_progress "$draw_title" "$draw_info"
+        gz_extract_distros "$_gzroot" "$_update_distros"
+        gz_menu_distros update "$_gzroot" "$_update_distros"
+        gz_cleanup_extract
+        gz_cleanup_download
+    fi
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gyoza_extract() {
+    _dev=$1; shift
+
+    [ ! "$*" ] && usage_extract && exit 1
+    _destdir=$1
+
+    if [ -d $_destdir ]; then
+        shift; _files=$*
+        [ ! "$_files" ] && usage_extract && exit 1
+        trap 'gz_cleanup_img' INT
+        gz_img get "$_dev" "$_destdir" "$_files"
+        gz_cleanup_img
+    else
+        _distros=$*
+        _gzroot=`gz_get_dev_mnt $_dev` || exit 1
+        trap "gz_cleanup_extract; gz_cleanup_dev_mnt $_gzroot" INT
+        _distros=`echo $_distros | sed 's/+/ /'`
+        gz_extract_distros "$_gzroot" "$_distros"
+        gz_cleanup_extract
+        gz_cleanup_dev_mnt $_gzroot
+    fi
+}
+
+gyoza_download() {
+    _dev=$1; shift
+    _distros=$*
+
+    [ "$_distros" ] || return 1
+
+    _gzroot=`gz_get_dev_mnt $_dev` || exit 1
+    trap "gz_cleanup_download; gz_cleanup_dev_mnt $_gzroot" INT
+
+    if [ "`echo $_distros | sed -n '/^http/p'`" ]; then
+        for _url in $_distros; do
+            gz_general_download "`basename $_url`" "$_url" "$_gzroot/`basename $_url`"
+        done
+    else
+        _distros=`echo $_distros | sed 's/+/ /'`
+        gz_download_distros $_gzroot $_distros
+    fi
+
+    draw_title="Download Status"
+    draw_info=`gz_draw_info_get 2>/dev/null`
+    gz_draw_all_files_progress "$draw_title" "$draw_info"
+
+    gz_cleanup_download
+    gz_cleanup_dev_mnt $_gzroot
+}
+
+gyoza_create() {
+    _create_dev=$1; shift
+    _distros=$*
+    _size=$GZ_SIZE
+
+    trap "gz_cleanup_create" INT
+
+    gz_create $_create_dev $_size
+    [ $? = 0 ] || return 1
+
+    if [ "$_distros" ]; then
+        trap "gz_cleanup_extract; gz_cleanup_download; gz_cleanup_create" INT
+        gz_download_distros $GZ_DEV_MNT $_distros
+        draw_title="Download Status"
+        draw_info=`gz_draw_info_get 2>/dev/null`
+        gz_draw_all_files_progress "$draw_title" "$draw_info"
+        gz_extract_distros $GZ_DEV_MNT $_distros
+        gz_cleanup_extract
+        gz_cleanup_download
+    fi
+    gyoza_remenu $GZ_DEV_MNT
+    gz_cleanup_create
+    gyoza_test $_create_dev
+}
+
+distributed() {
+    eol=$(sed -n '/^exit 0/=' $PROGRAM_REALPATH)
+    [ "$eol" -eq "`wc -l $PROGRAM_REALPATH | awk '{print $1}'`" ] && return 1
+    return 0
+}
+
+main() {
+    command="$1"; shift
+    [ ! "$command" ] && usage && exit 0
+    if ! distributed; then
+        source `dirname $PROGRAM_REALPATH`/gz_logger
+        source `dirname $PROGRAM_REALPATH`/gz_create
+        source `dirname $PROGRAM_REALPATH`/gz_draw_file_progress
+        source `dirname $PROGRAM_REALPATH`/gz_download
+        source `dirname $PROGRAM_REALPATH`/gz_img
+        source `dirname $PROGRAM_REALPATH`/gz_extract
+        source `dirname $PROGRAM_REALPATH`/gz_menu
+        source `dirname $PROGRAM_REALPATH`/gz_import
+        gz_set_log_level $LOG_DEBUG
+    fi
+
+    TEMP=$(getopt -a -o ADSfpuhl:L:s:t: --longoptions add,delete,select,force,passtpm,uefi,help,log:,logfile:,fs-label:,size:,theme: -- "$@")
+    if [ $? != 0 ] ; then gz_msg "Terminating..." >&2 ; exit 1 ; fi
+    eval set -- "$TEMP"
+
+    GZ_SIZE=8G
+    GZ_PATH_ESXI=/esxi
+    GZ_PATH_MSDOS=/msdos
+    GZ_PATH_WINDOWS=
+    GZ_FS_LABEL=GYOZA
+    GZ_FORCE=
+    GZ_THEME=
+    GZ_THEME_ADD=
+    GZ_THEME_DELETE=
+    GZ_THEME_SELECT=
+    GZ_TEST_UEFI=
+    GZ_DISTROS_ALL=$GZ_DOWNLOAD_DISTROS_ALL
+    GZ_DISTROS_DEFAULT="archlinux debian"
+
+    while true; do
+        case "$1" in
+            -h | --help ) usage ;;
+            -l | --log ) eval gz_set_log_level \$LOG_`echo $2 | tr [:lower:] [:upper:]`; shift 2 ;;
+            -L | --logfile )  gz_set_log_action "$2"; shift 2 ;;
+            -f | --force ) GZ_FORCE=yes; shift 1 ;;
+                 --fs-label ) GZ_FS_LABEL=$2; shift 2 ;;
+            -p | --passtpm ) GZ_BYPASSTPM=yes; shift 1 ;;
+            -s | --size ) GZ_SIZE="$2"; shift 2 ;;
+            -A | --add ) GZ_THEME_ADD=yes; shift 1 ;;
+            -D | --delete ) GZ_THEME_DELETE=yes; shift 1 ;;
+            -S | --select ) GZ_THEME_SELECT=yes; shift 1 ;;
+            -t | --theme ) GZ_THEME="/theme/$2/theme.txt"; shift 2 ;;
+            -u | --uefi ) GZ_TEST_UEFI=uefi; shift 1 ;;
+            -- ) shift; break ;;
+            * ) break ;;
+        esac
+    done
+
+    case "$command" in
+        create|download|extract|remenu|update|add|remove|import|deport|test|supported|info|theme)
+            [ -z "$1" -o "$1" = "help" ] && eval usage_$command && exit 0
+            _dev="`echo $1 | sed 's|/\+|/|'`"; shift; _distros="$@"
+
+            gz_log_debug "$FUNCNAME: command -> $command, device -> $_dev, distros -> $_distros"
+            if [ "$command" != "create" -a "$command" != "supported" ]; then
+                [ -e $_dev ] || gz_log_err_exit "No $_dev device existed"
+
+                if [ -f "$_dev" ]; then
+                    file $_dev | grep -i "dos/mbr" > /dev/nulll || gz_log_err_exit "$_dev is not a device file"
+                fi
+
+                if [ -b "$_dev" ]; then
+                    ls /sys/block/`basename $_dev` > /dev/null 2>&1 || gz_log_err_exit "$_dev is not a main block device"
+                fi
+            fi
+
+            if [ "$command" = "download" -o "$command" = "extract" ]; then
+                gz_log_debug "gyoza download or extract with argv $_distros"
+            elif [ "$command" = "import" ]; then
+                imgfile=`echo $_distros | awk -F : '{print $1}'`
+                [ -f "$imgfile" ] || gz_log_err_exit "No such $imgfile existed!"
+            elif [ "$command" = "deport" ]; then
+                [ "$_distros" ] || gz_log_err_exit "No deport ID assigned, use info command to get ID"
+            elif [ "$command" = "test" -o "$command" = "info" -o "$command" = "supported" ]; then
+                _distros=
+            elif [ "$command" = "theme" ]; then
+                [ "$_distros" ] || gz_log_err_exit "No theme assigned !"
+                [ "$GZ_THEME_ADD" -a "$GZ_THEME_DELETE" ] && gz_log_err_exit "Can not assign add and delete theme at same time!"
+                [ -z "$GZ_THEME_SELECT" -a -z "$GZ_THEME_DELETE" ] && GZ_THEME_ADD=yes
+            else
+                if [ "$_distros" = "all" ]; then
+                    _distros=$GZ_DISTROS_ALL
+                elif [ "$_distros" = "default" ]; then
+                    _distros=$GZ_DISTROS_DEFAULT
+                fi
+                _distros=`echo $_distros | sed 's/+/ /'`
+                gz_distros_parse $_distros
+            fi
+
+            eval gyoza_$command $_dev "$_distros"
+            ;;
+        help|*)
+            case "$1" in
+                create|download|extract|remenu|update|add|remove|import|deport|test|supported|info|theme)
+                    eval usage_$1 && exit 0
+                    ;;
+                *)
+                    usage
+                    ;;
+            esac
+    esac
+}
+
+main $@
+exit 0
